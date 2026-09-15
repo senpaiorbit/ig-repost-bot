@@ -4,6 +4,7 @@ Login order:
   1. INSTAGRAM_SESSIONID cookies first (bypasses 2FA)
   2. Turso-cached session via set_settings BEFORE login
   3. Fresh user/pass login, passing verification_code UP FRONT (one attempt only)
+     2FA resolution: one-shot code -> TOTP provider -> local seed.
 429 during login -> 45min (RATE_LOGIN_BLOCK_MIN) breaker persisted in Turso.
 Verifies user_id after every reconnect.
 """
@@ -81,6 +82,16 @@ def _totp_now(seed: str) -> Optional[str]:
         import pyotp
         return pyotp.TOTP(seed).now()
     except Exception:
+        return None
+
+
+async def _provider_code() -> Optional[str]:
+    """TOTP Worker code (step-3 source b). None when unconfigured/failing."""
+    try:
+        from app import totp_client
+        return await totp_client.fetch_code()
+    except Exception as e:
+        log.info("totp provider unavailable: %s", type(e).__name__)
         return None
 
 
@@ -189,8 +200,11 @@ async def login(username: str = "", password: str = "", sessionid: str = "",
                 log.info("cached session invalid, fresh login: %s", type(e).__name__)
                 cl = _new_client()
 
-        # 3. Fresh login — exactly ONE attempt, 2FA code passed UP FRONT
-        twofa = (twofa_code or "").strip() or _totp_now(totp_seed)
+        # 3. Fresh login — exactly ONE attempt, 2FA code passed UP FRONT.
+        # Resolution order: (a) one-shot code, (b) TOTP provider, (c) local seed.
+        twofa = ((twofa_code or "").strip()
+                 or await _provider_code()
+                 or _totp_now(totp_seed))
         # Optional full session-state restore before login
         if settings.INSTAGRAM_SESSION_STATE:
             try:
