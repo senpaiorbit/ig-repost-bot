@@ -320,7 +320,7 @@ async def fetch_candidates(count: int) -> List[dict]:
     return out[:count]
 
 
-async def _inner(target_count: int, comment_text: str, job_id: str) -> dict:
+async def _inner(target_count: int, comment_text: str, job_id: str, cover_url: str = "") -> dict:
     daily = await db.incr_daily_count()
     if daily > settings.MAX_PER_DAY:
         return {"posted": 0, "skipped": 0, "error": "daily cap reached", "daily": daily}
@@ -371,18 +371,19 @@ async def _inner(target_count: int, comment_text: str, job_id: str) -> dict:
             skipped += 1
             continue
 
-        # Thumbnail: sidecar -> THUMBNAIL_URL -> generated frame
+        # Thumbnail: sidecar -> explicit ?cover= / THUMBNAIL_URL -> generated frame
         thumb = ""
         for ext in (".jpg", ".jpeg", ".png", ".webp"):
             c = Path(tmpdir) / f"thumb{ext}"
             if c.exists():
                 thumb = str(c)
                 break
-        if not thumb and (settings.THUMBNAIL_URL or "").strip():
+        _cover_src = (cover_url or settings.THUMBNAIL_URL or "").strip()
+        if not thumb and _cover_src:
             try:
                 import httpx
                 async with httpx.AsyncClient(timeout=15) as hc:
-                    resp = await hc.get((settings.THUMBNAIL_URL or "").strip())
+                    resp = await hc.get(_cover_src)
                 if resp.status_code == 200 and resp.content:
                     cover_path = Path(tmpdir) / "cover_url.jpg"
                     cover_path.write_bytes(resp.content)
@@ -415,9 +416,9 @@ async def _inner(target_count: int, comment_text: str, job_id: str) -> dict:
         posted += 1
         registry.touch(job_id, progress=posted)
 
-        # Optional comment + pin (pipe-separated variants, random pick)
+        # Optional comment + pin (pipe-separated variants, random pick) - explicit ?comment= overrides COMMENT_ENABLED
         variants = [v.strip() for v in (comment_text or "").split("|") if v.strip()]
-        if variants and settings.COMMENT_ENABLED and repost_pk:
+        if variants and repost_pk and (settings.COMMENT_ENABLED or (comment_text or "").strip() != ""):
             try:
                 await ig_client.comment_and_pin(repost_pk, random.choice(variants))
             except Exception as e:
@@ -426,11 +427,11 @@ async def _inner(target_count: int, comment_text: str, job_id: str) -> dict:
     return {"posted": posted, "skipped": skipped, "write_calls": write_calls, "daily": daily}
 
 
-def run_upload_job(target_count: int = 1, comment_text: str = "") -> Any:
+def run_upload_job(target_count: int = 1, comment_text: str = "", cover_url: str = "") -> Any:
     jid_holder: dict = {}
 
     async def _coro():
-        return await _inner(target_count, comment_text, jid_holder["id"])
+        return await _inner(target_count, comment_text, jid_holder["id"], cover_url)
 
     job = registry.start_job("upload", _coro, total=target_count)
     jid_holder["id"] = job.id
@@ -576,7 +577,7 @@ async def _single_inner(source: str, comment_text: str, cover_url: str, job_id: 
         await ig_client.set_hide_like(repost_pk, True)
 
     variants = [v.strip() for v in (comment_text or "").split("|") if v.strip()]
-    if variants and settings.COMMENT_ENABLED and repost_pk:
+    if variants and repost_pk and (settings.COMMENT_ENABLED or (comment_text or "").strip() != ""):
         try:
             await ig_client.comment_and_pin(repost_pk, random.choice(variants))
         except Exception as e:
