@@ -1,34 +1,38 @@
-# ig-totp — Cloudflare TOTP provider for the bot
+# ig-totp — shared 2FA codes for every project/deployment
 
-Matches `app/totp_client.py`: `GET /code?key=<TOTP_KEY>&slot=default`
-returns `{"ok": true, "code": "123456", "expires_in_sec": 27}`.
+Live: `https://ig-totp.tanbirst2st2.workers.dev`
 
-## Deploy (2 min, Dashboard — no CLI needed)
+## GUI (login-time codes)
 
-1. Cloudflare Dashboard → Workers & Pages → Create → Hello World → paste
-   `totp-worker/worker.js` → Deploy.
-2. Worker → Settings → Variables → Add Secret (NOT plain text):
-   - `TOTP_KEY` = provider password (ask orchestrator — generated, 48 hex chars)
-   - `TOTP_SEED` = Instagram 2FA seed (spaces ok, stripped automatically)
-   - optional multi-account: `TOTP_SLOTS` = JSON like `{"acc2": "SEED..."}`
-3. URL will be `https://ig-totp.<your-subdomain>.workers.dev`.
-4. Test: `/health` → `{"ok": true}`; `/code?key=...&slot=default` → code.
+Open `/` in a browser → enter provider **key** + **slot** → live 6-digit code
+with countdown, auto-refresh and copy button. Use it whenever an account
+asks for a code at login. Wrong key → `forbidden`; unknown slot → 404.
 
-## CLI alternative
+## API (bots)
 
-```
-cd totp-worker
-npx wrangler login
-npx wrangler secret put TOTP_KEY
-npx wrangler secret put TOTP_SEED
-npx wrangler deploy
-```
+`GET /code?key=<TOTP_KEY>&slot=<slot>` →
+`{"ok": true, "code": "123456", "expires_in_sec": 27, "slot": "..."}`
 
-## Bot wiring (Render env)
+Matches `app/totp_client.py` (cache + single-flight + silent fallback to the
+local seed). `GET /health` → `{"ok": true}`.
 
-- `TOTP_PROVIDER_URL` = `https://ig-totp.<sub>.workers.dev`
-- `TOTP_KEY` = same value as the Worker secret
-- `TOTP_SLOT` = `default`
+## Sharing: one slot per project
 
-Provider failure falls back to local `INSTAGRAM_TOTP_SEED` automatically —
-safe to enable anytime.
+- Slot `default` reads the `TOTP_SEED` secret.
+- Any other slot reads the `TOTP_SLOTS` JSON secret, e.g.
+  `{"acc2": "SEED...", "shopbot": "SEED..."}`.
+- One master `TOTP_KEY` gates all slots; isolation between projects is by
+  slot name. Rotate the key by updating the Worker secret + every consumer.
+- Add a slot: `PUT .../workers/scripts/ig-totp/secrets`
+  `{"name": "TOTP_SLOTS", "text": "{...merged...}", "type": "secret_text"}`
+  (merge with existing JSON first). Remove: `DELETE .../secrets/TOTP_SLOTS`.
+- Consumer env per project: `TOTP_PROVIDER_URL` (Worker URL),
+  `TOTP_KEY` (same value), `TOTP_SLOT` (its slot name).
+
+## Deploy notes (learned the hard way)
+
+- Upload this file **raw** (`Content-Type: application/javascript`), NOT as
+  multipart — the API silently stores multipart envelopes as the script.
+- Then enable the route: `POST .../workers/scripts/ig-totp/subdomain`
+  `{"enabled": true}` — without it the URL serves `error code: 1042`.
+- Secrets persist across uploads; allow ~1 min propagation after changes.
