@@ -10,7 +10,7 @@ import random
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Optional
 
 from app.config import settings
 from app.db import db
@@ -44,6 +44,51 @@ def quality_gate(video_path: str) -> bool:
     except Exception:
         pass
     return True
+
+
+_FEED_KEYS = ("items", "medias", "feed_items", "ranked_items", "tray",
+               "users", "results", "reels", "clips", "posts")
+
+
+def _raw_len(result: Any) -> int:
+    try:
+        return len(result)
+    except Exception:
+        return 1 if result is not None else 0
+
+
+def _unwrap_medias(result: Any) -> tuple:
+    """Normalize any fetch result to (medias_list, raw_count, shape_hint).
+
+    Unwraps dicts/objects via known feed keys, else scans dict values for the
+    first list. Never iterates a bare dict's keys as media. Hint carries dict
+    keys or the type name only — never content.
+    """
+    if result is None:
+        return [], 0, "none"
+    if isinstance(result, (list, tuple)):
+        return list(result), len(result), "list"
+    if not isinstance(result, dict):
+        for key in _FEED_KEYS:
+            try:
+                val = getattr(result, key, None)
+            except Exception:
+                val = None
+            if isinstance(val, (list, tuple)):
+                return list(val), _raw_len(result), "attr:" + key
+    else:
+        for key in _FEED_KEYS:
+            val = result.get(key)
+            if isinstance(val, (list, tuple)):
+                return list(val), _raw_len(result), "key:" + key
+        for k, v in result.items():
+            if isinstance(v, (list, tuple)) and v:
+                return list(v), _raw_len(result), "scan:" + str(k)[:32]
+        keys = ",".join(sorted(str(k)[:32] for k in result.keys())[:8])
+        return [], _raw_len(result), "dict-keys:" + keys
+    if getattr(result, "code", None) is not None or getattr(result, "pk", None) is not None:
+        return [result], 1, "single:" + type(result).__name__
+    return [], _raw_len(result), "type:" + type(result).__name__
 
 
 async def fetch_candidates(count: int) -> List[dict]:
@@ -87,21 +132,32 @@ async def fetch_candidates(count: int) -> List[dict]:
     for name, fn in fetchers:
         try:
             await human_jitter((1, 2))
-            medias = await fn()
-            if isinstance(medias, dict):
-                medias = medias.get("items") or medias.get("medias") or []
+            medias, raw, hint = _unwrap_medias(await fn())
+            before = len(out)
             await _collect(medias)
+            log.info("candidates source=%s raw=%d parsed=%d shape=%s",
+                     name, raw, len(out) - before, hint)
         except Exception as e:
             log.info("candidate fetch %s failed: %s", name, type(e).__name__)
         if len(out) >= count:
             break
-    try:
-        if len(out) < count:
-            explore = await cl.get_explore_feed()
-            items = explore.get("items") if isinstance(explore, dict) else explore
-            await _collect(items)
-    except Exception as e:
-        log.info("candidate fetch explore failed: %s", type(e).__name__)
+    if len(out) < count:
+        explore_fn = None
+        for meth in ("get_explore_feed", "explore_feed", "explore"):
+            if hasattr(cl, meth):
+                explore_fn = getattr(cl, meth)
+                break
+        if explore_fn is None:
+            log.info("candidate fetch explore skipped: no explore method on client")
+        else:
+            try:
+                medias, raw, hint = _unwrap_medias(await explore_fn())
+                before = len(out)
+                await _collect(medias)
+                log.info("candidates source=explore raw=%d parsed=%d shape=%s",
+                         raw, len(out) - before, hint)
+            except Exception as e:
+                log.info("candidate fetch explore failed: %s", type(e).__name__)
     return out[:count]
 
 
@@ -153,9 +209,6 @@ async def _inner(target_count: int, comment_text: str, job_id: str) -> dict:
             video_path = await ig_client.download_video(cand["pk"], tmpdir)
         except Exception as e:
             log.info("download failed %s: %s", cand["code"], type(e).__name__)
-            skipped += 1
-            continue
-        if not quality_gate(str(video_path)):
             skipped += 1
             continue
 
