@@ -2,7 +2,7 @@
 
 All endpoints key-protected via ?key= (hmac.compare_digest).
 EVERY endpoint accepts ?cronjob=1 -> returns in <2s via background execution.
-Rate limits (token buckets per IP) on /upload /archive /archive_one /reconnect.
+Rate limits (token buckets per IP) on /upload /upload_one /archive /archive_one /reconnect.
 """
 import asyncio
 import logging
@@ -18,7 +18,7 @@ from app.utils import constant_time_compare, parse_duration
 log = logging.getLogger("instaward")
 logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO))
 
-RATE_LIMITED_PATHS = {"/upload", "/archive", "/archive_one", "/reconnect"}
+RATE_LIMITED_PATHS = {"/upload", "/upload_one", "/archive", "/archive_one", "/reconnect"}
 
 
 def _is_cronjob(v) -> bool:
@@ -172,6 +172,31 @@ async def upload(request: Request, key: str = Query(default=""),
                 "note": "already running"}
     return {"ok": True, "job_id": job.id, "kind": "upload",
             "amount": target, "cronjob": _cron_flag(cronjob)}
+
+
+# -- GET /upload_one -----------------------------------------------------
+@app.get("/upload_one")
+async def upload_one(request: Request, key: str = Query(default=""),
+                     url: str = Query(default=""),
+                     comment: str = Query(default=""),
+                     cover: str = Query(default=""),
+                     cronjob: str = Query(default="")):
+    if not _authorized(key):
+        return _deny()
+    denied = _rate_check(request, _is_cronjob(cronjob))
+    if denied is not None:
+        return denied
+    if not (url or "").strip():
+        return JSONResponse({"ok": False, "error": "missing url"}, status_code=400)
+    from app.upload_job import run_single_job
+    # Single uploads ALWAYS run in background (job_id instantly, <2s);
+    # ?cronjob= is accepted for uniformity and echoed back.
+    job = run_single_job(url, comment or settings.COMMENT_TEXT, cover or "")
+    if job.note == "already running":
+        return {"ok": True, "job_id": job.id, "kind": "single",
+                "cronjob": _cron_flag(cronjob), "note": "already running"}
+    return {"ok": True, "job_id": job.id, "kind": "single",
+            "cronjob": _cron_flag(cronjob)}
 
 
 # -- GET /a_job ----------------------------------------------------------
