@@ -322,20 +322,47 @@ async def delete_media(media_pk: str) -> bool:
 
 
 async def set_hide_like(media_pk: str, hide: bool = True) -> bool:
-    """Best-effort hide-like on a media. Never raises."""
+    """Best-effort hide-like on a media. Never raises.
+
+    aiograpi/instagrapi signatures differ across builds: most accept
+    media_hide_likes(media_id) with no flag, some accept a revert flag,
+    and some expose it only via media_edit(...). Probe each variant and
+    swallow TypeError mismatches so uploads never fail on this step.
+    """
     try:
         cl = await get_client()
-        if hasattr(cl, "media_hide_likes"):
-            await cl.media_hide_likes(int(media_pk), hide)
-            return True
-        if hasattr(cl, "media_edit"):
-            await cl.media_edit(int(media_pk), hide_like=hide)
-            return True
-        log.info("hidelike unsupported on client")
-        return False
     except Exception as e:
-        log.info("hidelike failed: %s", type(e).__name__)
+        log.info("hidelike no client: %s", type(e).__name__)
         return False
+    if hide and hasattr(cl, "media_hide_likes"):
+        for args in ((int(media_pk),), (int(media_pk), False), (int(media_pk), True)):
+            try:
+                await cl.media_hide_likes(*args)
+                return True
+            except TypeError:
+                continue
+            except Exception as e:
+                log.info("hidelike failed: %s", type(e).__name__)
+                return False
+    if not hide and hasattr(cl, "media_unhide_likes"):
+        try:
+            await cl.media_unhide_likes(int(media_pk))
+            return True
+        except Exception as e:
+            log.info("hidelike failed: %s", type(e).__name__)
+            return False
+    if hasattr(cl, "media_edit"):
+        for kwargs in ({"hide_like": hide}, {"like_and_view_counts_disabled": hide}):
+            try:
+                await cl.media_edit(int(media_pk), **kwargs)
+                return True
+            except TypeError:
+                continue
+            except Exception as e:
+                log.info("hidelike failed: %s", type(e).__name__)
+                return False
+    log.info("hidelike unsupported on client")
+    return False
 
 
 async def comment_and_pin(media_pk: str, text: str) -> bool:
