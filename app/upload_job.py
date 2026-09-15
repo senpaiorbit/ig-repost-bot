@@ -420,7 +420,7 @@ def run_upload_job(target_count: int = 1, comment_text: str = "") -> Any:
     jid_holder: dict = {}
 
     async def _coro():
-        return await _inner(target_count, comment_text, jid_holder["id"])
+        return await _single_inner(1, comment_text, jid_holder["id"])
 
     job = registry.start_job("upload", _coro, total=target_count)
     jid_holder["id"] = job.id
@@ -505,6 +505,18 @@ async def _single_inner(source: str, comment_text: str, cover_url: str, job_id: 
             log.info("single resolve failed %s: %s", code, type(e).__name__)
     if not pk and not code:
         return {"posted": 0, "error": "could not resolve source"}
+
+    # Caption needs the original author/text even when pk came from local
+    # decode (steps a/b skip media_info, leaving author/caption empty and
+    # degrading the caption to a bare credit line). One read-only fetch.
+    if pk and (not author or not caption_text):
+        try:
+            norm = _norm_item(await ig_client.fetch_media_info(pk))
+            if norm:
+                author = author or norm.get("author", "")
+                caption_text = caption_text or norm.get("caption", "")
+        except Exception as e:
+            log.info("caption info fetch failed: %s", type(e).__name__)
 
     registry.touch(job_id, progress=0, total=1)
     tmpdir = tempfile.mkdtemp(prefix="single_")
