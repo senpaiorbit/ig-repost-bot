@@ -186,6 +186,7 @@ async def reconnect(request: Request, key: str = Query(default=""),
 async def upload(request: Request, key: str = Query(default=""),
                  amount: int = Query(default=1),
                  comment: str = Query(default=""),
+                 cover: str = Query(default=""),
                  cronjob: str = Query(default="")):
     if not _authorized(key):
         return _deny()
@@ -194,7 +195,9 @@ async def upload(request: Request, key: str = Query(default=""),
         return denied
     from app.upload_job import run_upload_job
     target = 1 if _is_cronjob(cronjob) else max(1, int(amount or 1))
-    job = run_upload_job(target, comment or settings.COMMENT_TEXT)
+    # cover: explicit ?cover= wins, else THUMBNAIL_URL env fallback (same as upload_one)
+    # comment: explicit ?comment= wins, else COMMENT_TEXT env
+    job = run_upload_job(target, comment or settings.COMMENT_TEXT, cover or settings.THUMBNAIL_URL or "")
     if job.note == "already running":
         return {"ok": True, "job_id": job.id, "kind": "upload",
                 "amount": target, "cronjob": _cron_flag(cronjob),
