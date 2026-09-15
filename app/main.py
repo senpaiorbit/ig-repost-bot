@@ -96,6 +96,35 @@ async def turso_check(key: str = Query(default="")):
         return JSONResponse({"ok": False, "detail": type(e).__name__}, status_code=503)
 
 
+# -- GET /totp_check -----------------------------------------------------
+@app.get("/totp_check")
+async def totp_check(key: str = Query(default="")):
+    """Prove the Render -> Cloudflare TOTP provider path end to end.
+
+    Never returns the code itself (length + round-trip only). A login that
+    needs 2FA uses this exact path before falling back to the local seed.
+    """
+    if not _authorized(key):
+        return _deny()
+    import os
+    from app import totp_client
+    url = (os.getenv("TOTP_PROVIDER_URL", "") or "").strip()
+    has_key = bool(os.getenv("TOTP_KEY", ""))
+    slot = (os.getenv("TOTP_SLOT", "") or "").strip() or "default"
+    if not url or not has_key:
+        return {"ok": False, "configured": False,
+                "hint": "set TOTP_PROVIDER_URL + TOTP_KEY env vars"}
+    started = time.time()
+    code = await totp_client.fetch_code()
+    elapsed_ms = int((time.time() - started) * 1000)
+    if not code:
+        return {"ok": False, "configured": True, "reachable": False,
+                "slot": slot, "roundtrip_ms": elapsed_ms,
+                "hint": "provider unreachable — logins fall back to local seed"}
+    return {"ok": True, "configured": True, "reachable": True,
+            "slot": slot, "code_len": len(code), "roundtrip_ms": elapsed_ms}
+
+
 # -- GET /login_status ---------------------------------------------------
 @app.get("/login_status")
 async def login_status(key: str = Query(default=""), cronjob: str = Query(default="")):
