@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: instaward-bot
+    name: ig-repost-bot
     runtime: python
     plan: free
     branch: main
