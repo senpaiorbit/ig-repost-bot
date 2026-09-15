@@ -7,6 +7,7 @@ optional comment+pin, owner==self guard not needed here (candidates are others).
 import asyncio
 import logging
 import random
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -421,5 +422,128 @@ def run_upload_job(target_count: int = 1, comment_text: str = "") -> Any:
         return await _inner(target_count, comment_text, jid_holder["id"])
 
     job = registry.start_job("upload", _coro, total=target_count)
+    jid_holder["id"] = job.id
+    return job
+
+
+def parse_ig_source(raw: str) -> dict:
+    """Accept an IG reel/post URL, bare shortcode, or numeric media_pk.
+
+    Returns {"code": ..., "pk": ...}; pk is "" when only a code is known
+    (resolved later via media_info).
+    """
+    s = (raw or "").strip()
+    if not s:
+        raise ValueError("empty source")
+    m = re.search(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", s)
+    if m:
+        return {"code": m.group(1), "pk": ""}
+    tail = s.rstrip("/").split("/")[-1].split("?")[0].strip()
+    if tail.isdigit():
+        return {"code": "", "pk": tail}
+    if re.fullmatch(r"[A-Za-z0-9_-]{5,64}", tail):
+        return {"code": tail, "pk": ""}
+    raise ValueError("unrecognized source")
+
+
+async def _single_inner(source: str, comment_text: str, cover_url: str, job_id: str) -> dict:
+    """One-candidate pipeline: download -> gate -> cover -> upload -> hidelike -> comment."""
+    from app import ig_client
+    try:
+        parsed = parse_ig_source(source)
+    except Exception as e:
+        return {"posted": 0, "error": f"bad source: {type(e).__name__}"}
+    code, pk = parsed["code"], parsed["pk"]
+    author, caption_text = "", ""
+
+    # Resolve code -> pk: direct media_pk_from_code lookup first (guarded),
+    # then media_info, then code-as-is fallback (download fails gracefully).
+    if not pk and code:
+        try:
+            from app import ig_client as _igc
+            _cl = await _igc.get_client()
+            if hasattr(_cl, "media_pk_from_code"):
+                pk = str(await _cl.media_pk_from_code(code) or "")
+        except Exception as e:
+            log.info("single pk lookup failed %s: %s", code, type(e).__name__)
+    if not pk and code:
+        try:
+            norm = _norm_item(await ig_client.fetch_media_info(code))
+            if norm and norm.get("pk"):
+                pk = norm["pk"]
+                author = norm.get("author", "")
+                caption_text = norm.get("caption", "")
+        except Exception as e:
+            log.info("single resolve failed %s: %s", code, type(e).__name__)
+    if not pk and not code:
+        return {"posted": 0, "error": "could not resolve source"}
+
+    registry.touch(job_id, progress=0, total=1)
+    tmpdir = tempfile.mkdtemp(prefix="single_")
+    try:
+        video_path = await ig_client.download_video(pk, tmpdir)
+    except Exception as e:
+        log.info("single download failed: %s %.200s", type(e).__name__, e)
+        return {"posted": 0, "error": f"download failed: {type(e).__name__}"}
+    if not quality_gate(str(video_path)):
+        return {"posted": 0, "error": "quality gate rejected"}
+
+    # Cover: explicit cover_url (httpx 15s) -> sidecar -> generated frame
+    thumb = ""
+    if (cover_url or "").strip():
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=15) as hc:
+                resp = await hc.get((cover_url or "").strip())
+            if resp.status_code == 200 and resp.content:
+                cover_path = Path(tmpdir) / "cover_url.jpg"
+                cover_path.write_bytes(resp.content)
+                thumb = str(cover_path)
+        except Exception as e:
+            log.info("single cover download failed: %s", type(e).__name__)
+    if not thumb:
+        for ext in (".jpg", ".jpeg", ".png", ".webp"):
+            c = Path(tmpdir) / f"thumb{ext}"
+            if c.exists():
+                thumb = str(c)
+                break
+    if not thumb:
+        thumb = _make_cover(str(video_path), tmpdir)
+
+    caption = build_caption(caption_text, author)
+    await human_jitter()
+
+    # ONE clip_upload attempt — no retries, no blind re-attempts
+    try:
+        media = await ig_client.upload_reel(str(video_path), caption, thumb)
+    except Exception as e:
+        log.info("single upload failed: %s %.200s", type(e).__name__, e)
+        return {"posted": 0, "error": f"upload failed: {type(e).__name__}"}
+
+    repost_pk = str(getattr(media, "pk", "") or "")
+    repost_code = str(getattr(media, "code", "") or "")
+    if settings.HIDELIKE and repost_pk:
+        await ig_client.set_hide_like(repost_pk, True)
+
+    variants = [v.strip() for v in (comment_text or "").split("|") if v.strip()]
+    if variants and settings.COMMENT_ENABLED and repost_pk:
+        try:
+            await ig_client.comment_and_pin(repost_pk, random.choice(variants))
+        except Exception as e:
+            log.info("comment+pin failed: %s", type(e).__name__)
+
+    await db.mark_processed(code or repost_code or pk, pk, author, repost_pk, repost_code)
+    await db.set_pacing("last_post_ms", str(int(time.time() * 1000)))
+    registry.touch(job_id, progress=1)
+    return {"posted": 1, "repost_code": repost_code, "repost_pk": repost_pk}
+
+
+def run_single_job(source: str, comment_text: str = "", cover_url: str = "") -> Any:
+    jid_holder: dict = {}
+
+    async def _coro():
+        return await _single_inner(source, comment_text, cover_url, jid_holder["id"])
+
+    job = registry.start_job("single", _coro, total=1)
     jid_holder["id"] = job.id
     return job
