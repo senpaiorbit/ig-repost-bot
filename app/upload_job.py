@@ -20,6 +20,23 @@ from app.utils import build_caption, human_jitter
 log = logging.getLogger("instaward.upload")
 
 
+def _make_cover(video_path: str, tmpdir: str) -> str:
+    """Generate a JPEG cover frame via imageio-ffmpeg binary. Returns "" on any failure."""
+    try:
+        import imageio_ffmpeg  # type: ignore
+        import subprocess
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        out = str(Path(tmpdir) / "cover.jpg")
+        subprocess.run([exe, "-y", "-ss", "1", "-i", str(video_path),
+                        "-vframes", "1", out],
+                       timeout=60, capture_output=True, check=True)
+        if Path(out).exists() and Path(out).stat().st_size > 0:
+            return out
+    except Exception:
+        pass
+    return ""
+
+
 def quality_gate(video_path: str) -> bool:
     p = Path(video_path)
     try:
@@ -351,17 +368,17 @@ async def _inner(target_count: int, comment_text: str, job_id: str) -> dict:
             log.info("download failed %s: %s %.200s", cand["code"], type(e).__name__, e)
             skipped += 1
             continue
-        if not quality_gate(str(video_path)):
-            skipped += 1
-            continue
 
-        # Thumbnail sidecar: reuse downloaded cover if present, else skip thumb
+        # Thumbnail: reuse downloaded cover sidecar if present, else generate
+        # a cover frame via ffmpeg (aiograpi fallback unchanged if both miss).
         thumb = ""
         for ext in (".jpg", ".jpeg", ".png", ".webp"):
             c = Path(tmpdir) / f"thumb{ext}"
             if c.exists():
                 thumb = str(c)
                 break
+        if not thumb:
+            thumb = _make_cover(str(video_path), tmpdir)
 
         caption = build_caption(cand.get("caption", ""), cand.get("author", ""))
         await human_jitter()

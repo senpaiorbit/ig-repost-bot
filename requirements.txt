@@ -8,3 +8,4 @@ pyotp
 httpx
 Pillow
 imageio-ffmpeg
+moviepy==2.2.1
