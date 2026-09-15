@@ -98,9 +98,12 @@ class DB:
     def _connect_sync(self) -> Any:
         from app.config import settings
         try:
-            import libsql_experimental as libsql
-        except ImportError as e:  # pragma: no cover
-            raise RuntimeError("libsql-experimental is not installed") from e
+            import libsql
+        except ImportError:
+            try:
+                import libsql_experimental as libsql
+            except ImportError as e:  # pragma: no cover
+                raise RuntimeError("no libsql driver installed (need 'libsql' package)") from e
         url, token = resolve_turso_creds(settings.TURSO_URL, settings.TURSO_AUTH_TOKEN)
         if not url:
             raise RuntimeError("TURSO_URL is not set")
