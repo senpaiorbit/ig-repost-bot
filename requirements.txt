@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 aiograpi[video]
-libsql-experimental
+libsql
 pydantic
 python-dotenv
 pyotp
