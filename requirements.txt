@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+aiograpi[video]
+libsql-experimental
+pydantic
+python-dotenv
+pyotp
+httpx
+Pillow
