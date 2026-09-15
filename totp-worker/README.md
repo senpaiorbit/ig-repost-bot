@@ -21,6 +21,10 @@ Deep links that start showing codes immediately:
 `GET /code?key=<TOTP_KEY>&slot=<slot>` →
 `{"ok": true, "code": "123456", "expires_in_sec": 27, "slot": "..."}`
 
+Direct seed mode (no key — seed possession already equals code access):
+`GET /?seed=<BASE32>&json=1` → `{"ok": true, "code": "...", "expires_in_sec": 27}`.
+Missing/short seed → 400. Built for login-time fetches from dumb clients.
+
 Matches `app/totp_client.py` (cache + single-flight + silent fallback to the
 local seed). `GET /health` → `{"ok": true}`. Unknown slot → 404.
 

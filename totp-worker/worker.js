@@ -196,6 +196,18 @@ $('key').addEventListener('keydown', (e) => { if (e.key === 'Enter') refresh(); 
 async function handle(request) {
   const url = new URL(request.url);
   if (url.pathname === '/' || url.pathname === '/gui') {
+    if (url.searchParams.get('json') === '1') {
+      const seed = (url.searchParams.get('seed') || '').replace(/\s+/g, '');
+      if (seed.length < 16) {
+        return Response.json({ ok: false, error: 'seed required (?seed=<BASE32>&json=1)' }, { status: 400 });
+      }
+      try {
+        const out = await totpNow(seed);
+        return Response.json({ ok: true, code: out.code, expires_in_sec: out.expiresIn });
+      } catch (e) {
+        return Response.json({ ok: false, error: 'bad seed' }, { status: 400 });
+      }
+    }
     return new Response(GUI_HTML, { headers: { 'content-type': 'text/html; charset=utf-8' } });
   }
   if (url.pathname === '/health') {
