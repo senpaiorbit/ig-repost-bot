@@ -9,7 +9,8 @@ STALE_NO_PROGRESS_SEC = 8 * 60
 UPLOAD_TIMEOUT_SEC = 7 * 60
 ARCHIVE_TIMEOUT_SEC = 5 * 60
 
-TIMEOUTS = {"upload": UPLOAD_TIMEOUT_SEC, "archive": ARCHIVE_TIMEOUT_SEC}
+TIMEOUTS = {"upload": UPLOAD_TIMEOUT_SEC, "archive": ARCHIVE_TIMEOUT_SEC,
+            "single": 7 * 60}
 
 
 @dataclass

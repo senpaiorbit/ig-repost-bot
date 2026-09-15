@@ -321,6 +321,23 @@ async def delete_media(media_pk: str) -> bool:
     return True
 
 
+async def set_hide_like(media_pk: str, hide: bool = True) -> bool:
+    """Best-effort hide-like on a media. Never raises."""
+    try:
+        cl = await get_client()
+        if hasattr(cl, "media_hide_likes"):
+            await cl.media_hide_likes(int(media_pk), hide)
+            return True
+        if hasattr(cl, "media_edit"):
+            await cl.media_edit(int(media_pk), hide_like=hide)
+            return True
+        log.info("hidelike unsupported on client")
+        return False
+    except Exception as e:
+        log.info("hidelike failed: %s", type(e).__name__)
+        return False
+
+
 async def comment_and_pin(media_pk: str, text: str) -> bool:
     cl = await get_client()
     comment = await cl.media_comment(int(media_pk), str(text))
