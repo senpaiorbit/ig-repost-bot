@@ -1,4 +1,9 @@
-"""Retirement pipeline (DESIGN.md pseudocode)."""
+"""Retirement pipeline (DESIGN.md pseudocode).
+
+For OWN reposts only (owner == self guard): age from repost time AND views <=
+threshold -> delete clips (IG can't archive clips), archive photos via
+media_archive. DB flags (archived, archive_scanned) always updated.
+"""
 import logging
 from typing import Any
 
@@ -50,6 +55,7 @@ async def _inner(time_sec: int, views_thresh: int, batch_limit: int,
                 await db.mark_scanned(row["code"])
                 scanned += 1
                 continue
+            # Views check live
             views = 0
             for attr in ("view_count", "play_count", "like_count"):
                 v = getattr(info, attr, None)
@@ -60,6 +66,7 @@ async def _inner(time_sec: int, views_thresh: int, batch_limit: int,
                         views = max(views, int(v))
                     except (ValueError, TypeError):
                         pass
+            # all_flag bypasses age/views thresholds (explicit sweep)
             if not all_flag and not only_code and views > views_thresh:
                 await db.mark_scanned(row["code"])
                 scanned += 1
@@ -73,6 +80,7 @@ async def _inner(time_sec: int, views_thresh: int, batch_limit: int,
             if product.lower() in ("clips", "reel", "igtv"):
                 is_clip = True
         except Exception as e:
+            # Never touch media we couldn't verify; still count scan attempt
             log.info("archive verify failed %s: %s", row.get("code"), type(e).__name__)
             scanned += 1
             continue

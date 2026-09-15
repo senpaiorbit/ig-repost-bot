@@ -65,6 +65,7 @@ def _new_client() -> Any:
     if not _AIOGRAPI or Client is None:
         raise RuntimeError("aiograpi is not installed")
     cl = Client(delay_range=_delay_range())  # type: ignore[operator]
+    # Keep delays jittered on every call
     try:
         cl.delay_range = _delay_range()
     except Exception:
@@ -174,6 +175,7 @@ async def login(username: str = "", password: str = "", sessionid: str = "",
         if cached:
             try:
                 cl.set_settings(cached)
+                # Respect TTL: stale cache still tried, failure falls through
                 await cl.get_timeline_feed()
                 uid = int(cl.user_id or 0)
                 if uid:
@@ -189,6 +191,7 @@ async def login(username: str = "", password: str = "", sessionid: str = "",
 
         # 3. Fresh login — exactly ONE attempt, 2FA code passed UP FRONT
         twofa = (twofa_code or "").strip() or _totp_now(totp_seed)
+        # Optional full session-state restore before login
         if settings.INSTAGRAM_SESSION_STATE:
             try:
                 cl.set_settings(json.loads(settings.INSTAGRAM_SESSION_STATE))
@@ -210,6 +213,7 @@ async def login(username: str = "", password: str = "", sessionid: str = "",
             await db.save_session(username, cl.get_settings())
         except Exception as e:
             log.warning("session save failed: %s", type(e).__name__)
+        # Consume one-shot codes after success (env-managed; just log, never print value)
         if twofa_code:
             log.info("one-shot 2FA code consumed")
         try:
@@ -237,11 +241,12 @@ async def reconnect() -> int:
     uid = await login()
     if not uid:
         raise RuntimeError("reconnect failed: no user_id")
+    # Verify expected account when DS_USER_ID is configured
     if settings.INSTAGRAM_DS_USER_ID:
         try:
             if int(uid) != int(settings.INSTAGRAM_DS_USER_ID):
                 raise RuntimeError(
-                    "session user_id mismatch (see INSTAGRAM_DS_USER_ID)")
+                    "session user_id mismatch vs INSTAGRAM_DS_USER_ID")
         except ValueError:
             pass
     return uid

@@ -1,4 +1,9 @@
-"""Curation/upload pipeline (DESIGN.md pseudocode)."""
+"""Curation/upload pipeline (DESIGN.md pseudocode).
+
+shuffle, quality gate, pacing (60s retry same candidate), single clip_upload
+(no blind retry), MAX_WRITE_CALLS 40, daily cap fail, caption + Credit,
+optional comment+pin, owner==self guard not needed here (candidates are others).
+"""
 import asyncio
 import logging
 import random
@@ -25,8 +30,10 @@ def quality_gate(video_path: str) -> bool:
             return False
     except Exception:
         return False
+    # Resolution check via Pillow when available; skip if unreadable
     try:
         from PIL import Image
+        # videos: Pillow can't read; try thumbnail sidecar only if image
         if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
             with Image.open(p) as im:
                 w, h = im.size
@@ -152,6 +159,7 @@ async def _inner(target_count: int, comment_text: str, job_id: str) -> dict:
             skipped += 1
             continue
 
+        # Thumbnail sidecar: reuse downloaded cover if present, else skip thumb
         thumb = ""
         for ext in (".jpg", ".jpeg", ".png", ".webp"):
             c = Path(tmpdir) / f"thumb{ext}"
@@ -182,6 +190,7 @@ async def _inner(target_count: int, comment_text: str, job_id: str) -> dict:
         posted += 1
         registry.touch(job_id, progress=posted)
 
+        # Optional comment + pin (pipe-separated variants, random pick)
         variants = [v.strip() for v in (comment_text or "").split("|") if v.strip()]
         if variants and settings.COMMENT_ENABLED and repost_pk:
             try:
