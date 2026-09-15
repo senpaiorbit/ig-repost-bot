@@ -276,6 +276,20 @@ async def get_client() -> Any:
 async def upload_reel(video_path: str, caption: str, thumbnail_path: str = "") -> Any:
     cl = await get_client()
     cl.delay_range = _delay_range()
+    # Guarded ffmpeg setup: aiograpi shells out to `ffmpeg` when analyzing
+    # clips/generating thumbnails; Render's Python image has none. Point env
+    # lookups at imageio-ffmpeg's static binary when available. Never log paths.
+    try:
+        import imageio_ffmpeg  # type: ignore
+        import os as _os
+        _exe = imageio_ffmpeg.get_ffmpeg_exe()
+        _os.environ["IMAGEIO_FFMPEG_EXE"] = _exe
+        _os.environ["FFMPEG_BINARY"] = _exe
+        _dir = _os.path.dirname(_exe)
+        if _dir and _dir not in _os.environ.get("PATH", "").split(_os.pathsep):
+            _os.environ["PATH"] = _dir + _os.pathsep + _os.environ.get("PATH", "")
+    except Exception:
+        pass
     kwargs: dict = {}
     if thumbnail_path:
         kwargs["thumbnail"] = Path(thumbnail_path)
