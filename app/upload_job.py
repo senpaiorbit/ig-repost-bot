@@ -348,7 +348,10 @@ async def _inner(target_count: int, comment_text: str, job_id: str) -> dict:
         try:
             video_path = await ig_client.download_video(cand["pk"], tmpdir)
         except Exception as e:
-            log.info("download failed %s: %s", cand["code"], type(e).__name__)
+            log.info("download failed %s: %s %.200s", cand["code"], type(e).__name__, e)
+            skipped += 1
+            continue
+        if not quality_gate(str(video_path)):
             skipped += 1
             continue
 
@@ -369,7 +372,7 @@ async def _inner(target_count: int, comment_text: str, job_id: str) -> dict:
             write_calls += 1
         except Exception as e:
             write_calls += 1
-            log.info("upload failed %s: %s", cand["code"], type(e).__name__)
+            log.info("upload failed %s: %s %.200s", cand["code"], type(e).__name__, e)
             skipped += 1
             continue
 

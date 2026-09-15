@@ -94,7 +94,7 @@ async def _inner(time_sec: int, views_thresh: int, batch_limit: int,
             await db.mark_archived(row["code"])
             archived += 1
         except Exception as e:
-            log.info("archive action failed %s: %s", row.get("code"), type(e).__name__)
+            log.info("archive action failed %s: %s %.200s", row.get("code"), type(e).__name__, e)
             continue
         registry.touch(job_id, progress=archived)
 
