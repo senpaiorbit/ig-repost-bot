@@ -371,14 +371,24 @@ async def _inner(target_count: int, comment_text: str, job_id: str) -> dict:
             skipped += 1
             continue
 
-        # Thumbnail: reuse downloaded cover sidecar if present, else generate
-        # a cover frame via ffmpeg (aiograpi fallback unchanged if both miss).
+        # Thumbnail: sidecar -> THUMBNAIL_URL -> generated frame
         thumb = ""
         for ext in (".jpg", ".jpeg", ".png", ".webp"):
             c = Path(tmpdir) / f"thumb{ext}"
             if c.exists():
                 thumb = str(c)
                 break
+        if not thumb and (settings.THUMBNAIL_URL or "").strip():
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=15) as hc:
+                    resp = await hc.get((settings.THUMBNAIL_URL or "").strip())
+                if resp.status_code == 200 and resp.content:
+                    cover_path = Path(tmpdir) / "cover_url.jpg"
+                    cover_path.write_bytes(resp.content)
+                    thumb = str(cover_path)
+            except Exception as e:
+                log.info("cover download failed: %s", type(e).__name__)
         if not thumb:
             thumb = _make_cover(str(video_path), tmpdir)
 
