@@ -420,7 +420,7 @@ def run_upload_job(target_count: int = 1, comment_text: str = "") -> Any:
     jid_holder: dict = {}
 
     async def _coro():
-        return await _single_inner(1, comment_text, jid_holder["id"])
+        return await _inner(target_count, comment_text, jid_holder["id"])
 
     job = registry.start_job("upload", _coro, total=target_count)
     jid_holder["id"] = job.id
