@@ -5,6 +5,7 @@ shuffle, quality gate, pacing (60s retry same candidate), single clip_upload
 optional comment+pin, owner==self guard not needed here (candidates are others).
 """
 import asyncio
+import inspect
 import logging
 import random
 import re
@@ -426,6 +427,27 @@ def run_upload_job(target_count: int = 1, comment_text: str = "") -> Any:
     return job
 
 
+def shortcode_to_pk(code: str) -> str:
+    """Pure local shortcode -> pk decode (mirrors instagrapi media_pk_from_code).
+
+    Alphabet "A-Za-z0-9-_" as base64-style big-endian int. "" on any failure.
+    """
+    try:
+        s = (code or "").strip()
+        if not s or len(s) > 64:
+            return ""
+        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        value = 0
+        for ch in s:
+            idx = alphabet.find(ch)
+            if idx == -1:
+                return ""
+            value = value * 64 + idx
+        return str(value) if value > 0 else ""
+    except Exception:
+        return ""
+
+
 def parse_ig_source(raw: str) -> dict:
     """Accept an IG reel/post URL, bare shortcode, or numeric media_pk.
 
@@ -456,14 +478,20 @@ async def _single_inner(source: str, comment_text: str, cover_url: str, job_id: 
     code, pk = parsed["code"], parsed["pk"]
     author, caption_text = "", ""
 
-    # Resolve code -> pk: direct media_pk_from_code lookup first (guarded),
-    # then media_info, then code-as-is fallback (download fails gracefully).
+    # Resolve code -> pk: (a) pure local decode, (b) media_pk_from_code
+    # (sync OR async — await only if awaitable), (c) media_info,
+    # (d) code-as-is last resort.
+    if not pk and code:
+        pk = shortcode_to_pk(code)
     if not pk and code:
         try:
             from app import ig_client as _igc
             _cl = await _igc.get_client()
             if hasattr(_cl, "media_pk_from_code"):
-                pk = str(await _cl.media_pk_from_code(code) or "")
+                _res = _cl.media_pk_from_code(code)
+                if inspect.isawaitable(_res):
+                    _res = await _res
+                pk = str(_res or "")
         except Exception as e:
             log.info("single pk lookup failed %s: %s", code, type(e).__name__)
     if not pk and code:
