@@ -91,6 +91,157 @@ def _unwrap_medias(result: Any) -> tuple:
     return [], _raw_len(result), "type:" + type(result).__name__
 
 
+_NEST_KEYS = ("media_or_ad", "item", "media", "clip", "reel", "post", "node")
+_SUBLIST_KEYS = ("items", "clips", "reels")
+
+
+def _has_code(m: Any) -> bool:
+    if isinstance(m, dict):
+        return m.get("code") is not None or m.get("pk") is not None or m.get("id") is not None
+    try:
+        return (getattr(m, "code", None) is not None
+                or getattr(m, "pk", None) is not None
+                or getattr(m, "id", None) is not None)
+    except Exception:
+        return False
+
+
+def _describe_element(m: Any) -> str:
+    """Key/attr names of a raw element only — never values/content."""
+    if isinstance(m, dict):
+        return "keys:" + ",".join(sorted(str(k)[:32] for k in m.keys())[:8])
+    try:
+        names = sorted(n[:32] for n in dir(m) if not n.startswith("__"))[:12]
+    except Exception:
+        names = []
+    return "attrs:" + ",".join(names) + "|type:" + type(m).__name__
+
+
+def _norm_item(m: Any) -> Optional[dict]:
+    """Unwrap nested media wrappers -> {code, pk, author, caption, media_type} or None."""
+    try:
+        node = m
+        # 1. nested single-media keys, max depth 3
+        for _ in range(3):
+            if _has_code(node):
+                break
+            nxt = None
+            if isinstance(node, dict):
+                for key in _NEST_KEYS:
+                    v = node.get(key)
+                    if v is None or isinstance(v, (str, int, float, bool, list, tuple)):
+                        continue
+                    nxt = v
+                    break
+            else:
+                for key in ("media_or_ad", "item", "media"):
+                    try:
+                        v = getattr(node, key, None)
+                    except Exception:
+                        v = None
+                    if v is not None and not isinstance(v, (str, int, float, bool, list, tuple)):
+                        nxt = v
+                        break
+            if nxt is None:
+                break
+            node = nxt
+        # 2. tray-style sublists: items/clips/reels list -> element [0]
+        if not _has_code(node):
+            sub = None
+            if isinstance(node, dict):
+                for key in _SUBLIST_KEYS:
+                    v = node.get(key)
+                    if isinstance(v, (list, tuple)) and v:
+                        sub = v[0]
+                        break
+            else:
+                for key in _SUBLIST_KEYS:
+                    try:
+                        v = getattr(node, key, None)
+                    except Exception:
+                        v = None
+                    if isinstance(v, (list, tuple)) and v:
+                        sub = v[0]
+                        break
+            if sub is not None:
+                node = sub
+        if not _has_code(node):
+            return None
+        # 3/4. fields with author/caption fallbacks
+        if isinstance(node, dict):
+            code = node.get("code")
+            pk = node.get("pk", node.get("id"))
+            author = ""
+            for ak in ("user", "owner", "uploader"):
+                u = node.get(ak)
+                if isinstance(u, dict):
+                    author = u.get("username", "") or ""
+                elif u is not None:
+                    try:
+                        author = getattr(u, "username", "") or ""
+                    except Exception:
+                        author = ""
+                if author:
+                    break
+            cap = node.get("caption_text", "") or ""
+            if not cap:
+                c2 = node.get("caption") or {}
+                cap = c2.get("text", "") if isinstance(c2, dict) else str(c2 or "")
+            if not cap:
+                cap = node.get("title", "") or ""
+            mt = node.get("media_type", 2)
+        else:
+            try:
+                code = getattr(node, "code", None)
+            except Exception:
+                code = None
+            try:
+                pk = getattr(node, "pk", None) or getattr(node, "id", None)
+            except Exception:
+                pk = None
+            author = ""
+            for ak in ("user", "owner", "uploader"):
+                try:
+                    u = getattr(node, ak, None)
+                except Exception:
+                    u = None
+                if isinstance(u, dict):
+                    author = u.get("username", "") or ""
+                elif u is not None:
+                    try:
+                        author = getattr(u, "username", "") or ""
+                    except Exception:
+                        author = ""
+                if author:
+                    break
+            try:
+                cap = getattr(node, "caption_text", None) or ""
+            except Exception:
+                cap = ""
+            if not cap:
+                try:
+                    c2 = getattr(node, "caption", None)
+                except Exception:
+                    c2 = None
+                cap = c2.get("text", "") if isinstance(c2, dict) else (str(c2) if c2 else "")
+            if not cap:
+                try:
+                    cap = getattr(node, "title", "") or ""
+                except Exception:
+                    cap = ""
+            try:
+                mt = getattr(node, "media_type", 2)
+            except Exception:
+                mt = 2
+        if not code:
+            return None
+        return {"code": str(code), "pk": str(pk or ""),
+                "author": str(author or ""), "caption": str(cap or ""),
+                "media_type": str(mt if mt is not None else 2)}
+    except Exception:
+        return None
+
+
 async def fetch_candidates(count: int) -> List[dict]:
     """Fetch timeline + reels + explore candidates via aiograpi."""
     from app import ig_client
@@ -99,31 +250,20 @@ async def fetch_candidates(count: int) -> List[dict]:
     seen = set()
 
     async def _collect(medias: Any):
-        for m in medias or []:
+        items = list(medias or [])
+        parsed = 0
+        for m in items:
             try:
-                code = getattr(m, "code", None) or (m.get("code") if isinstance(m, dict) else None)
-                pk = getattr(m, "pk", None) or getattr(m, "id", None) or (
-                    m.get("pk") if isinstance(m, dict) else None)
-                user = getattr(m, "user", None) or (m.get("user") if isinstance(m, dict) else {})
-                if isinstance(user, dict):
-                    uname = user.get("username", "")
-                else:
-                    uname = getattr(user, "username", "")
-                caption_text = ""
-                cap = getattr(m, "caption_text", None)
-                if cap:
-                    caption_text = str(cap)
-                elif isinstance(m, dict):
-                    cap2 = m.get("caption_text") or m.get("caption") or {}
-                    caption_text = cap2.get("text", "") if isinstance(cap2, dict) else str(cap2 or "")
-                if not code or code in seen:
+                norm = _norm_item(m)
+                if not norm or not norm["code"] or norm["code"] in seen:
                     continue
-                seen.add(code)
-                out.append({"code": str(code), "pk": str(pk or ""),
-                            "author": str(uname or ""), "caption": caption_text,
-                            "media_type": str(getattr(m, "media_type", 2))})
+                seen.add(norm["code"])
+                out.append(norm)
+                parsed += 1
             except Exception:
                 continue
+        if items and parsed == 0:
+            log.info("candidates zero-parsed sample: %s", _describe_element(items[0]))
 
     fetchers = [
         ("timeline", lambda: cl.get_timeline_feed()),
