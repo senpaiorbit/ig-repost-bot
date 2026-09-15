@@ -5,8 +5,16 @@ Live: `https://ig-totp.tanbirst2st2.workers.dev`
 ## GUI (login-time codes)
 
 Open `/` in a browser → enter provider **key** + **slot** → live 6-digit code
-with countdown, auto-refresh and copy button. Use it whenever an account
-asks for a code at login. Wrong key → `forbidden`; unknown slot → 404.
+with countdown, auto-refresh and copy button. Wrong key → clear message
+(seed pasted as key is detected and explained); `forget saved` wipes stored
+key/slot.
+
+Deep links that start showing codes immediately:
+
+- `/?seed=<BASE32>` — **local mode**: codes computed in the browser, no key
+  needed. Seed stays in your address bar — private devices only.
+- `/?slot=<name>&key=<TOTP_KEY>` — server mode, pre-filled and auto-started.
+  Note: the key lands in browser history — prefer typing it.
 
 ## API (bots)
 
@@ -14,7 +22,7 @@ asks for a code at login. Wrong key → `forbidden`; unknown slot → 404.
 `{"ok": true, "code": "123456", "expires_in_sec": 27, "slot": "..."}`
 
 Matches `app/totp_client.py` (cache + single-flight + silent fallback to the
-local seed). `GET /health` → `{"ok": true}`.
+local seed). `GET /health` → `{"ok": true}`. Unknown slot → 404.
 
 ## Sharing: one slot per project
 
