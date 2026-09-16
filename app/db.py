@@ -1,5 +1,12 @@
-"""Turso/libsql DB — sync implementation using `libsql`."""
-import libsql
+"""SQLite DB (stdlib) with optional Turso/libsql when available."""
+import os
+import sqlite3
+from typing import Optional
+
+try:
+    import libsql as _libsql
+except ImportError:
+    _libsql = None
 
 from app.config import settings
 
@@ -8,17 +15,22 @@ SCHEMA_SQL = "CREATE TABLE IF NOT EXISTS uploaded_media (id INTEGER PRIMARY KEY 
 JOBS_SCHEMA_SQL = "CREATE TABLE IF NOT EXISTS jobs (job_id TEXT PRIMARY KEY, target_url TEXT NOT NULL, post_type TEXT DEFAULT 'reel', status TEXT DEFAULT 'queued', media_id TEXT, error TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);"
 
 
-def get_client():
-    """Return libsql connection, falling back to local file if env missing."""
+def _local_path() -> str:
     db_url = settings.TURSO_DATABASE_URL or "file:local.db"
+    if db_url.startswith("file:"):
+        return db_url[5:] or "local.db"
+    return "local.db"
+
+
+def get_client():
+    db_url = settings.TURSO_DATABASE_URL or ""
     token = settings.TURSO_AUTH_TOKEN or ""
-    if db_url.startswith("file:") or not settings.TURSO_DATABASE_URL:
-        return libsql.connect(database="file:local.db")
-    return libsql.connect(database=db_url, auth_token=token)
+    if _libsql is not None and db_url and not db_url.startswith("file:"):
+        return _libsql.connect(database=db_url, auth_token=token)
+    return sqlite3.connect(_local_path(), check_same_thread=False)
 
 
 def init_schema():
-    """Create uploaded_media + jobs tables if needed."""
     con = get_client()
     con.execute(SCHEMA_SQL)
     con.execute(JOBS_SCHEMA_SQL)
@@ -79,7 +91,7 @@ def insert_job(job_id: str, target_url: str, post_type: str = "reel", status: st
     con.close()
 
 
-def update_job(job_id: str, status: str, media_id: str | None = None, error: str | None = None):
+def update_job(job_id: str, status: str, media_id: Optional[str] = None, error: Optional[str] = None):
     con = get_client()
     con.execute(JOBS_SCHEMA_SQL)
     con.execute("UPDATE jobs SET status = ?, media_id = COALESCE(?, media_id), error = COALESCE(?, error), updated_at = CURRENT_TIMESTAMP WHERE job_id = ?", (status, media_id, error, job_id))
