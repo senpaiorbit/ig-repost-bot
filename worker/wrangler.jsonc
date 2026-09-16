@@ -1,0 +1,8 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ig-repost-cache",
+  "main": "main.py",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["python_workers"],
+  "kv_namespaces": [{ "binding": "CACHE", "id": "PLACEHOLDER_KV_ID" }]
+}

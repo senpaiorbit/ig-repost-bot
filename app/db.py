@@ -1,339 +1,118 @@
-"""Turso (libSQL) connection, schema, queries.
+"""Turso/libsql DB — sync implementation using `libsql`."""
+import libsql
 
-- Tolerant creds resolver: tolerates `libsql://URL,JWT` paste mistakes in either var.
-- Auth failures -> caller raises HTTP 503 with actionable hint, never leaks URL/token.
-- Session cache key is per-username via ig_sessions.username PK.
-"""
-import asyncio
-import time
-from typing import Any, Dict, List, Optional
+from app.config import settings
 
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS processed_posts (
-    code TEXT PRIMARY KEY,
-    source_pk TEXT NOT NULL,
-    source_username TEXT NOT NULL,
-    repost_pk TEXT,
-    repost_code TEXT,
-    posted_at INTEGER NOT NULL,
-    archived INTEGER DEFAULT 0,
-    archive_scanned INTEGER DEFAULT 0,
-    created_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_processed_posted ON processed_posts(posted_at);
-CREATE INDEX IF NOT EXISTS idx_processed_archive ON processed_posts(archived, archive_scanned, posted_at);
-CREATE TABLE IF NOT EXISTS ig_sessions (
-    username TEXT PRIMARY KEY,
-    settings_json TEXT NOT NULL,
-    updated_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS pacing_state (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
-    updated_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS login_breaker (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    blocked_until INTEGER DEFAULT 0,
-    failure_count INTEGER DEFAULT 0,
-    last_failure_at INTEGER DEFAULT 0
-);
-"""
+SCHEMA_SQL = "CREATE TABLE IF NOT EXISTS uploaded_media (id INTEGER PRIMARY KEY AUTOINCREMENT, original_url TEXT NOT NULL UNIQUE, instagram_media_id TEXT NOT NULL, media_type TEXT CHECK(media_type IN ('reel','post')), status TEXT DEFAULT 'active', views INTEGER DEFAULT 0, uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP, archived_at DATETIME);"
 
-AUTH_HINT = (
-    "Turso auth failed. Use the per-DB token (full JWT with 3 parts) for TURSO_AUTH_TOKEN, "
-    "not the org API key; regenerate it from the Turso dashboard for this database and update "
-    "TURSO_URL/TURSO_AUTH_TOKEN env vars."
-)
+JOBS_SCHEMA_SQL = "CREATE TABLE IF NOT EXISTS jobs (job_id TEXT PRIMARY KEY, target_url TEXT NOT NULL, post_type TEXT DEFAULT 'reel', status TEXT DEFAULT 'queued', media_id TEXT, error TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);"
 
 
-class TursoAuthError(Exception):
-    pass
+def get_client():
+    """Return libsql connection, falling back to local file if env missing."""
+    db_url = settings.TURSO_DATABASE_URL or "file:local.db"
+    token = settings.TURSO_AUTH_TOKEN or ""
+    if db_url.startswith("file:") or not settings.TURSO_DATABASE_URL:
+        return libsql.connect(database="file:local.db")
+    return libsql.connect(database=db_url, auth_token=token)
 
 
-def _now_ms() -> int:
-    return int(time.time() * 1000)
+def init_schema():
+    """Create uploaded_media + jobs tables if needed."""
+    con = get_client()
+    con.execute(SCHEMA_SQL)
+    con.execute(JOBS_SCHEMA_SQL)
+    con.commit()
+    con.close()
 
 
-def resolve_turso_creds(url: str = "", token: str = "") -> tuple:
-    """Tolerate `libsql://URL,JWT` paste mistakes in either var.
-
-    If either var contains a comma, split into (url, token). If the URL part
-    lacks a scheme, prepend libsql://. Strips whitespace/quotes.
-    """
-    url = (url or "").strip().strip("'\"")
-    token = (token or "").strip().strip("'\"")
-    combined = ""
-    if "," in url:
-        combined = url
-    elif "," in token and "://" in token:
-        combined = token
-    if combined:
-        parts = [p.strip().strip("'\"") for p in combined.split(",")]
-        parts = [p for p in parts if p]
-        if len(parts) >= 2:
-            maybe_url, maybe_token = parts[0], parts[-1]
-            # Heuristic: the part containing :// or libsql/turso is the URL
-            if "://" in maybe_token and "://" not in maybe_url:
-                maybe_url, maybe_token = maybe_token, maybe_url
-            url, token = maybe_url, maybe_token
-    if url and "://" not in url:
-        url = "libsql://" + url
-    return url, token
+def init_jobs_schema():
+    con = get_client()
+    con.execute(JOBS_SCHEMA_SQL)
+    con.commit()
+    con.close()
 
 
-def _looks_like_auth_error(exc: Exception) -> bool:
-    msg = f"{type(exc).__name__}: {exc}".lower()
-    keys = ("invalidtoken", "invalid token", "unauthorized", "unauthenticated",
-            "forbidden", "hrana", "auth", "jwt", "token")
-    return any(k in msg for k in keys)
+def insert_media(original_url: str, instagram_media_id: str, media_type: str = "reel"):
+    con = get_client()
+    con.execute(SCHEMA_SQL)
+    con.execute("INSERT OR IGNORE INTO uploaded_media (original_url, instagram_media_id, media_type) VALUES (?, ?, ?)", (original_url, instagram_media_id, media_type))
+    con.commit()
+    cur = con.execute("SELECT id FROM uploaded_media WHERE original_url = ?", (original_url,))
+    row = cur.fetchone()
+    con.close()
+    return row[0] if row else None
 
 
-class DB:
-    def __init__(self) -> None:
-        self._conn: Any = None
-        self._lock = asyncio.Lock()
+def get_old_media(max_age_hours: int = 24):
+    con = get_client()
+    cur = con.execute("SELECT * FROM uploaded_media WHERE uploaded_at <= datetime('now', '-' || ? || ' hours') AND status = 'active'", (max_age_hours,))
+    rows = cur.fetchall()
+    cols = [d[0] for d in cur.description] if cur.description else []
+    con.close()
+    return [dict(zip(cols, r)) for r in rows]
 
-    # -- connection -----------------------------------------------------
-    def _connect_sync(self) -> Any:
-        from app.config import settings
+
+def update_status(instagram_media_id: str, status: str):
+    con = get_client()
+    if status in ("archived", "deleted"):
+        con.execute("UPDATE uploaded_media SET status = ?, archived_at = CURRENT_TIMESTAMP WHERE instagram_media_id = ?", (status, instagram_media_id))
+    else:
+        con.execute("UPDATE uploaded_media SET status = ? WHERE instagram_media_id = ?", (status, instagram_media_id))
+    con.commit()
+    con.close()
+
+
+def check_connection():
+    con = get_client()
+    cur = con.execute("SELECT 1")
+    row = cur.fetchone()
+    con.close()
+    return row[0] == 1 if row else False
+
+
+def insert_job(job_id: str, target_url: str, post_type: str = "reel", status: str = "queued"):
+    con = get_client()
+    con.execute(JOBS_SCHEMA_SQL)
+    con.execute("INSERT OR IGNORE INTO jobs (job_id, target_url, post_type, status) VALUES (?, ?, ?, ?)", (job_id, target_url, post_type, status))
+    con.commit()
+    con.close()
+
+
+def update_job(job_id: str, status: str, media_id: str | None = None, error: str | None = None):
+    con = get_client()
+    con.execute(JOBS_SCHEMA_SQL)
+    con.execute("UPDATE jobs SET status = ?, media_id = COALESCE(?, media_id), error = COALESCE(?, error), updated_at = CURRENT_TIMESTAMP WHERE job_id = ?", (status, media_id, error, job_id))
+    con.commit()
+    con.close()
+
+
+def get_job_row(job_id: str):
+    con = get_client()
+    try:
         try:
-            import libsql
-        except ImportError:
-            try:
-                import libsql_experimental as libsql
-            except ImportError as e:  # pragma: no cover
-                raise RuntimeError("no libsql driver installed (need 'libsql' package)") from e
-        url, token = resolve_turso_creds(settings.TURSO_URL, settings.TURSO_AUTH_TOKEN)
-        if not url:
-            raise RuntimeError("TURSO_URL is not set")
-        kwargs: Dict[str, Any] = {}
-        if token:
-            kwargs["auth_token"] = token
-        try:
-            conn = libsql.connect(url, **kwargs)
-        except Exception as e:
-            if _looks_like_auth_error(e):
-                raise TursoAuthError(AUTH_HINT) from e
-            raise
-        return conn
-
-    async def _conn_safe(self) -> Any:
-        if self._conn is None:
-            async with self._lock:
-                if self._conn is None:
-                    self._conn = await asyncio.to_thread(self._connect_sync)
-        return self._conn
-
-    async def _exec_sync(self, fn, *args):
-        conn = await self._conn_safe()
-        def _run():
-            cur = conn.cursor()
-            try:
-                return fn(cur, *args)
-            finally:
-                try:
-                    conn.commit()
-                except Exception:
-                    pass
-        try:
-            return await asyncio.to_thread(_run)
-        except Exception as e:
-            if _looks_like_auth_error(e):
-                raise TursoAuthError(AUTH_HINT) from e
-            raise
-
-    async def ping(self) -> None:
-        def _q(cur):
-            cur.execute("SELECT 1")
-            return cur.fetchone()
-        await self._exec_sync(_q)
-
-    async def init_schema(self) -> None:
-        conn = await self._conn_safe()
-        def _run():
-            stmts = [s.strip() for s in SCHEMA_SQL.split(";") if s.strip()]
-            cur = conn.cursor()
-            for s in stmts:
-                cur.execute(s)
-            try:
-                conn.commit()
-            except Exception:
-                pass
-        try:
-            await asyncio.to_thread(_run)
-        except Exception as e:
-            if _looks_like_auth_error(e):
-                raise TursoAuthError(AUTH_HINT) from e
-            raise
-
-    # -- sessions (per-username key) ------------------------------------
-    def session_key(self, username: str) -> str:
-        return f"ig_session:{username}"
-
-    async def get_session(self, username: str) -> Optional[dict]:
-        import json
-        def _q(cur, u):
-            cur.execute("SELECT settings_json FROM ig_sessions WHERE username = ?", (u,))
-            return cur.fetchone()
-        row = await self._exec_sync(_q, username)
-        if not row:
-            return None
-        try:
-            return json.loads(row[0])
+            con.execute(JOBS_SCHEMA_SQL)
         except Exception:
-            return None
-
-    async def save_session(self, username: str, settings_obj: dict) -> None:
-        import json
-        payload = json.dumps(settings_obj or {})
-        def _q(cur, u, p, now):
-            cur.execute(
-                "INSERT INTO ig_sessions(username, settings_json, updated_at) VALUES(?,?,?) "
-                "ON CONFLICT(username) DO UPDATE SET settings_json=excluded.settings_json, "
-                "updated_at=excluded.updated_at",
-                (u, p, now),
-            )
-        await self._exec_sync(_q, username, payload, _now_ms())
-
-    # -- processed posts -------------------------------------------------
-    async def is_processed(self, code: str) -> bool:
-        def _q(cur, c):
-            cur.execute("SELECT 1 FROM processed_posts WHERE code = ?", (c,))
-            return cur.fetchone()
-        return (await self._exec_sync(_q, code)) is not None
-
-    async def mark_processed(self, code: str, source_pk: str, source_user: str,
-                             repost_pk: str, repost_code: str) -> None:
-        now = _now_ms()
-        def _q(cur):
-            cur.execute(
-                "INSERT INTO processed_posts(code, source_pk, source_username, repost_pk, "
-                "repost_code, posted_at, archived, archive_scanned, created_at) "
-                "VALUES(?,?,?,?,?,?,0,0,?) "
-                "ON CONFLICT(code) DO UPDATE SET repost_pk=excluded.repost_pk, "
-                "repost_code=excluded.repost_code, posted_at=excluded.posted_at",
-                (code, str(source_pk or ""), str(source_user or ""), str(repost_pk or ""),
-                 str(repost_code or ""), now, now),
-            )
-        await self._exec_sync(_q)
-
-    async def mark_archived(self, code: str) -> None:
-        def _q(cur, c):
-            cur.execute(
-                "UPDATE processed_posts SET archived=1, archive_scanned=1 WHERE code = ?", (c,))
-        await self._exec_sync(_q, code)
-
-    async def mark_scanned(self, code: str) -> None:
-        def _q(cur, c):
-            cur.execute(
-                "UPDATE processed_posts SET archive_scanned=1 WHERE code = ?", (c,))
-        await self._exec_sync(_q, code)
-
-    async def get_archive_candidates(self, time_ms: int, views: int, limit: int) -> List[dict]:
-        cutoff = _now_ms() - int(time_ms)
-        def _q(cur, c, lim):
-            cur.execute(
-                "SELECT code, source_pk, source_username, repost_pk, repost_code, posted_at, "
-                "archived, archive_scanned FROM processed_posts "
-                "WHERE archived = 0 AND posted_at <= ? AND repost_pk IS NOT NULL "
-                "ORDER BY posted_at ASC LIMIT ?",
-                (c, lim),
-            )
-            cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, r)) for r in cur.fetchall()]
-        # views threshold is enforced live via IG media_info; DB narrows by age
-        return await self._exec_sync(_q, cutoff, int(limit))
-
-    async def get_recent(self, limit: int = 20) -> List[dict]:
-        def _q(cur, lim):
-            cur.execute(
-                "SELECT code, source_pk, source_username, repost_pk, repost_code, posted_at, "
-                "archived FROM processed_posts ORDER BY posted_at DESC LIMIT ?",
-                (lim,),
-            )
-            cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, r)) for r in cur.fetchall()]
-        return await self._exec_sync(_q, int(limit))
-
-    async def get_by_code(self, code: str) -> Optional[dict]:
-        def _q(cur, c):
-            cur.execute(
-                "SELECT code, source_pk, source_username, repost_pk, repost_code, posted_at, "
-                "archived, archive_scanned FROM processed_posts WHERE code = ? OR repost_code = ?",
-                (c, c),
-            )
-            row = cur.fetchone()
-            if not row:
-                return None
-            cols = [d[0] for d in cur.description]
-            return dict(zip(cols, row))
-        return await self._exec_sync(_q, code)
-
-    # -- pacing ----------------------------------------------------------
-    async def get_pacing(self, key: str) -> Optional[str]:
-        def _q(cur, k):
-            cur.execute("SELECT value FROM pacing_state WHERE key = ?", (k,))
-            r = cur.fetchone()
-            return r[0] if r else None
-        return await self._exec_sync(_q, key)
-
-    async def set_pacing(self, key: str, value: str) -> None:
-        def _q(cur, k, v, now):
-            cur.execute(
-                "INSERT INTO pacing_state(key, value, updated_at) VALUES(?,?,?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-                (k, str(value), now),
-            )
-        await self._exec_sync(_q, key, str(value), _now_ms())
-
-    async def incr_daily_count(self) -> int:
-        import datetime
-        today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
-        def _q(cur, day, now):
-            cur.execute("SELECT value FROM pacing_state WHERE key = ?", ("daily_count",))
-            r = cur.fetchone()
-            count, stored_day = 0, ""
-            if r:
-                try:
-                    stored_day, count = str(r[0]).split(":", 1)
-                    count = int(count)
-                except Exception:
-                    count, stored_day = 0, ""
-            if stored_day != day:
-                count = 0
-            count += 1
-            cur.execute(
-                "INSERT INTO pacing_state(key, value, updated_at) VALUES('daily_count',?,?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-                (f"{day}:{count}", now),
-            )
-            return count
-        return await self._exec_sync(_q, today, _now_ms())
-
-    # -- login breaker ---------------------------------------------------
-    async def get_login_breaker(self) -> dict:
-        def _q(cur):
-            cur.execute("SELECT blocked_until, failure_count, last_failure_at FROM login_breaker WHERE id = 1")
-            r = cur.fetchone()
-            if not r:
-                return {"blocked_until": 0, "failure_count": 0, "last_failure_at": 0}
-            return {"blocked_until": int(r[0] or 0), "failure_count": int(r[1] or 0),
-                    "last_failure_at": int(r[2] or 0)}
-        return await self._exec_sync(_q)
-
-    async def set_login_breaker(self, blocked_until: int, failure_count: int) -> None:
-        def _q(cur, b, f, now):
-            cur.execute(
-                "INSERT INTO login_breaker(id, blocked_until, failure_count, last_failure_at) "
-                "VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET blocked_until=excluded.blocked_until, "
-                "failure_count=excluded.failure_count, last_failure_at=excluded.last_failure_at",
-                (int(b), int(f), int(now)),
-            )
-        await self._exec_sync(_q, blocked_until, failure_count, _now_ms())
-
-    async def clear_login_breaker(self) -> None:
-        await self.set_login_breaker(0, 0)
+            pass
+        cur = con.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
+        row = cur.fetchone()
+        cols = [d[0] for d in cur.description] if cur.description else []
+        return dict(zip(cols, row)) if row else None
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
 
 
-db = DB()
+def count_today_uploads() -> int:
+    con = get_client()
+    try:
+        cur = con.execute("SELECT COUNT(*) FROM uploaded_media WHERE date(uploaded_at) = date('now')")
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass

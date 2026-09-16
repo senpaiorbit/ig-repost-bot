@@ -1,98 +1,25 @@
-# Render Blueprint — ig-repost-bot
-# Deploy: Dashboard → New → Blueprint → paste the repo URL → Apply.
-# Secrets (sync: false) are prompted at deploy time and never live in the repo.
-# Do NOT set PORT here — Render injects it and startCommand binds $PORT.
 services:
   - type: web
-    name: ig-repost-bot
+    name: ig-repost
     runtime: python
-    plan: free
-    region: singapore
-    branch: main
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-    healthCheckPath: /health
-    autoDeploy: true
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
-      # ---- secrets: prompted at deploy, never committed ----
-      - key: ENV_KEY
-        sync: false # API key for ?key= on every endpoint. Long random string.
-      - key: INSTAGRAM_USERNAME
+      - key: API_KEY
         sync: false
-      - key: INSTAGRAM_PASSWORD
+      - key: IG_USERNAME
         sync: false
-      - key: INSTAGRAM_TOTP_SEED
-        sync: false # 2FA seed (app-based 2FA only, spaces ok)
-      - key: INSTAGRAM_SESSIONID
-        sync: false # optional: cookie fast-path, bypasses 2FA
-      - key: INSTAGRAM_CSRFTOKEN
-        sync: false # optional: with SESSIONID + DS_USER_ID
-      - key: INSTAGRAM_DS_USER_ID
-        sync: false # optional: expected numeric user id, guards wrong-account sessions
-      - key: INSTAGRAM_SESSION_STATE
-        sync: false # optional: full session JSON restore
-      - key: INSTAGRAM_2FA_CODE
-        sync: false # optional: one-shot code (consumed on first login)
-      - key: TURSO_URL
-        sync: false # e.g. libsql://<db>-<org>.turso.io
+      - key: IG_PASSWORD
+        sync: false
+      - key: IG_TOTP_SEED
+        sync: false
+      - key: IG_SESSIONID
+        sync: false
+      - key: TURSO_DATABASE_URL
+        sync: false
       - key: TURSO_AUTH_TOKEN
-        sync: false # per-database full-access JWT (3 parts), NOT the org API key
-      - key: TOTP_PROVIDER_URL
-        sync: false # optional: https://ig-totp.<sub>.workers.dev (see totp-worker/)
-      - key: TOTP_KEY
-        sync: false # optional: provider password shared with the Worker
-      - key: TELEGRAM_BOT_TOKEN
-        sync: false # optional
-      - key: TELEGRAM_CHAT_ID
-        sync: false # optional
-      # ---- behavior (sane defaults, edit freely) ----
-      - key: LOG_LEVEL
-        value: INFO
-      - key: PYTHON_VERSION
-        value: 3.11.0 # pinned: abandoned deps have no newer-Python wheels
-      - key: MAX_PER_DAY
-        value: 10
-      - key: FETCH_COUNT
-        value: 30
-      - key: BOTLOG
-        value: 1
-      - key: HIDELIKE
-        value: 1 # no-op on current IG lib (no hide API), harmless
-      - key: COMMENT_ENABLED
-        value: 0 # set 1 to auto-comment on reposts
-      - key: COMMENT_TEXT
-        value: ''
-      - key: THUMBNAIL_URL
-        value: '' # default cover image URL (also passable per-upload via cover=)
-      - key: IG_CALL_JITTER_SEC
-        value: 1,3
-      - key: SESSION_REUSE_TTL_MIN
-        value: 120
-      - key: MIN_POST_INTERVAL_MIN
-        value: 30
-      - key: ARCHIVE_TIME
-        value: 24h
-      - key: ARCHIVE_VIEWS
-        value: 1000
-      - key: ARCHIVE_BATCH
-        value: 50
-      - key: QUALITY_MIN_WIDTH
-        value: 720
-      - key: QUALITY_MIN_HEIGHT
-        value: 1280
-      - key: QUALITY_MIN_SIZE_MB
-        value: 1
-      - key: RATE_LOGIN_BLOCK_MIN
-        value: 45
-      - key: RATE_ENDPOINT_CAP
-        value: 5
-      - key: RATE_ENDPOINT_REFILL_SEC
-        value: 60
-      - key: RATE_CRON_CAP
-        value: 3
-      - key: RATE_CRON_REFILL_SEC
-        value: 300
-      - key: MAX_WRITE_CALLS
-        value: 40
-      - key: TOTP_SLOT
-        value: default
+        sync: false
+      - key: CF_ACCOUNT_ID
+        sync: false
+      - key: CF_API_TOKEN
+        sync: false

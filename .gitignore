@@ -1,9 +1,8 @@
 __pycache__/
-*.pyc
 .env
-*.mp4
-*.jpg
-*.jpeg
-*.png
-*.webp
-/tmp_
+*.pyc
+.pytest_cache/
+venv/
+session.json
+local.db
+*.db
