@@ -14,6 +14,7 @@ from app.config import settings
 
 
 async def _call(fn, *args, **kwargs):
+    """Run aiograpi call without blocking the loop."""
     res = fn(*args, **kwargs)
     if inspect.isawaitable(res):
         return await res
@@ -160,6 +161,10 @@ class IGClient:
         dest = Path(dest_dir)
         dest.mkdir(parents=True, exist_ok=True)
         pk = await self.resolve_media_pk(target_url)
+        try:
+            return await self.download_via_media_info(pk, dest)
+        except Exception as e:
+            print(f"[ig] media_info download failed: {e}")
         last_err = None
         for name in ("video_download", "clip_download"):
             fn = getattr(self.cl, name, None)
@@ -181,6 +186,27 @@ class IGClient:
                 last_err = e
                 continue
         raise RuntimeError(f"download_video failed: {last_err}")
+
+    async def download_via_media_info(self, pk: int, dest_dir) -> Path:
+        info = await _maybe_thread(self.cl.media_info, pk)
+        try:
+            url = self._video_url(info)
+        except Exception:
+            url = None
+        if not url:
+            raise RuntimeError("media_info has no video url")
+        dest = Path(dest_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        out = dest / f"mi_{pk}.mp4"
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            data = r.content
+        ctype = (r.headers.get("content-type", "") or "").lower()
+        if ("video" in ctype) or (len(data) > 100 * 1024):
+            out.write_bytes(data)
+            return out
+        raise RuntimeError(f"media_info url rejected (ctype={ctype!r}, bytes={len(data)})")
 
     async def resolve_candidate(self, cand: str) -> str:
         return (cand or "").strip() if isinstance(cand, str) else cand
@@ -210,7 +236,14 @@ class IGClient:
         if isinstance(cand, str) and cand.startswith("pk:"):
             dest = Path(dest_dir)
             dest.mkdir(parents=True, exist_ok=True)
-            pk = int(cand[3:])
+            try:
+                pk = int(cand[3:])
+            except ValueError:
+                raise RuntimeError(f"bad pk candidate: {cand}")
+            try:
+                return await self.download_via_media_info(pk, dest)
+            except Exception as e:
+                print(f"[ig] media_info download failed: {e}")
             last_err = None
             for name in ("video_download", "clip_download"):
                 fn = getattr(self.cl, name, None)
