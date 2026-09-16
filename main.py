@@ -255,6 +255,8 @@ async def _run_auto_job(job_id: str, amount: int = 1, comment: str = "", cover: 
             feed_limit = 20
         uploaded: list[str] = []
         last_media_id = None
+        tried = 0
+        last_err = ""
         async with UPLOAD_LOCK:
             ig = IGClient()
             await ig.login()
@@ -274,7 +276,9 @@ async def _run_auto_job(job_id: str, amount: int = 1, comment: str = "", cover: 
                     except Exception:
                         dup = None
                     if dup:
+                        last_err = f"duplicate skipped: {cand}"
                         continue
+                tried += 1
                 tmpdir = tempfile.mkdtemp(prefix="igdl_")
                 video_path = None
                 cover_path = None
@@ -295,6 +299,7 @@ async def _run_auto_job(job_id: str, amount: int = 1, comment: str = "", cover: 
                     uploaded.append(media_id)
                     last_media_id = media_id
                 except Exception as e:
+                    last_err = str(e)
                     if "duplicate" in str(e).lower():
                         continue
                     print(f"[job {job_id}] candidate failed, trying next: {e}")
@@ -307,7 +312,7 @@ async def _run_auto_job(job_id: str, amount: int = 1, comment: str = "", cover: 
                         except Exception:
                             pass
             if not uploaded:
-                raise RuntimeError("all candidates failed")
+                raise RuntimeError(f"0/{len(cands)} candidates ok (tried {tried}), last error: {last_err or 'unknown'}")
         job["status"] = "success"
         job["media_id"] = last_media_id
         job["error"] = None
