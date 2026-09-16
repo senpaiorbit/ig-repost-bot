@@ -2,6 +2,7 @@
 import asyncio
 import inspect
 import random
+import re
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -160,6 +161,15 @@ class IGClient:
     async def download_video(self, target_url: str, dest_dir) -> Path:
         dest = Path(dest_dir)
         dest.mkdir(parents=True, exist_ok=True)
+        try:
+            code_info = self._code_from_url(target_url)
+        except Exception:
+            code_info = None
+        if code_info:
+            try:
+                return await self.download_via_embed(code_info[1], dest, kind=code_info[0])
+            except Exception as e:
+                print(f"[ig] embed download failed, falling back: {e}")
         pk = await self.resolve_media_pk(target_url)
         try:
             return await self.download_via_media_info(pk, dest)
@@ -208,10 +218,54 @@ class IGClient:
             return out
         raise RuntimeError(f"media_info url rejected (ctype={ctype!r}, bytes={len(data)})")
 
+    @staticmethod
+    def _code_from_url(url) -> Optional[tuple]:
+        try:
+            m = re.search(r"/(reel|reels|p)/([^/?#]+)", str(url or ""))
+        except Exception:
+            return None
+        if not m:
+            return None
+        kind = "reel" if m.group(1) in ("reel", "reels") else "p"
+        return kind, m.group(2)
+
+    async def download_via_embed(self, code: str, dest_dir, kind: str = "reel") -> Path:
+        page_url = f"https://www.instagram.com/{kind}/{code}/embed/"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36", "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US,en;q=0.9"}
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
+            r = await client.get(page_url)
+            if r.status_code != 200:
+                raise RuntimeError(f"embed page HTTP {r.status_code}")
+            m = re.search(r'"video_url":"(https://[^"]+\.mp4[^"]*)"', r.text)
+            if not m:
+                raise RuntimeError("embed page has no video_url")
+            vurl = m.group(1).replace("\\/", "/").replace("\\u0026", "&")
+            vr = await client.get(vurl)
+            vr.raise_for_status()
+            data = vr.content
+            ctype = (vr.headers.get("content-type", "") or "").lower()
+            if ("video" in ctype) or (len(data) > 100 * 1024):
+                dest = Path(dest_dir)
+                dest.mkdir(parents=True, exist_ok=True)
+                out = dest / f"embed_{code}.mp4"
+                out.write_bytes(data)
+                return out
+            raise RuntimeError(f"embed video rejected (ctype={ctype!r}, bytes={len(data)})")
+
     async def resolve_candidate(self, cand: str) -> str:
         return (cand or "").strip() if isinstance(cand, str) else cand
 
     async def download_candidate(self, cand: str, dest_dir) -> Path:
+        if isinstance(cand, str) and cand.startswith("http"):
+            try:
+                code_info = self._code_from_url(cand)
+            except Exception:
+                code_info = None
+            if code_info:
+                try:
+                    return await self.download_via_embed(code_info[1], dest_dir, kind=code_info[0])
+                except Exception as e:
+                    print(f"[ig] embed download failed, falling back: {e}")
         try:
             direct = (self._video_urls or {}).get(cand)
         except Exception:
