@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     AUTO_FEED_LIMIT: int = 20
     LOG_LEVEL: str = "INFO"
     TOTP_PROVIDER_URL: str = "https://ig-totp.tanbirst2st2.workers.dev"
+    SOURCE_USERNAMES: str = ""
 
 
 settings = Settings()
