@@ -4,11 +4,20 @@ import inspect
 import random
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 import httpx
 import pyotp
 from aiograpi import Client
+
 from app.config import settings
+
+
+async def _call(fn, *args, **kwargs):
+    res = fn(*args, **kwargs)
+    if inspect.isawaitable(res):
+        return await res
+    return res
 
 
 async def _maybe_thread(fn, *args, **kwargs):
@@ -74,11 +83,38 @@ class IGClient:
             print(f"[ig] dump_settings skipped: {e}")
 
     def _totp_code(self):
-        if self.totp_seed:
+        if not self.totp_seed:
+            return None
+        try:
+            base = (getattr(settings, "TOTP_PROVIDER_URL", "") or "").strip().rstrip("/")
+        except Exception:
+            base = ""
+        if base:
             try:
-                return pyotp.TOTP(self.totp_seed).now()
+                import re
+                with httpx.Client(timeout=10) as client:
+                    r = client.get(f"{base}/", params={"seed": self.totp_seed, "json": "1"})
+                    r.raise_for_status()
+                    data = r.json()
+                if isinstance(data, dict) and isinstance(data.get("data"), dict):
+                    data = data["data"]
+                raw = ""
+                if isinstance(data, dict):
+                    for k in ("code", "totp", "otp", "token", "pin"):
+                        if data.get(k) not in (None, ""):
+                            raw = str(data[k])
+                            break
+                digits = "".join(re.findall(r"\d", raw))
+                if len(digits) >= 6:
+                    print("[ig] TOTP via provider")
+                    return digits[:6]
+                print(f"[ig] TOTP provider bad payload, falling back: {raw!r}")
             except Exception as e:
-                print(f"[ig] TOTP failed: {e}")
+                print(f"[ig] TOTP provider failed, falling back: {e}")
+        try:
+            return pyotp.TOTP(self.totp_seed).now()
+        except Exception as e:
+            print(f"[ig] TOTP failed: {e}")
         return None
 
     async def login(self):
@@ -177,7 +213,7 @@ class IGClient:
         return await self.download_video(str(cand), dest_dir)
 
     @staticmethod
-    def _cand_url(item) -> str | None:
+    def _cand_url(item) -> Optional[str]:
         code = None
         pk = None
         mtype = ""
@@ -268,7 +304,7 @@ class IGClient:
                 break
         return out[:lim]
 
-    async def download_cover(self, url: str | None = None) -> Path:
+    async def download_cover(self, url: Optional[str] = None) -> Path:
         src = url or settings.COVER_IMAGE_URL
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             r = await client.get(src)
@@ -298,7 +334,7 @@ class IGClient:
             return await fn(str(video_path), caption, thumbnail=thumbnail_path)
         return await asyncio.to_thread(fn, str(video_path), caption, thumbnail=thumbnail_path)
 
-    async def post_actions(self, media_id, comment_text: str | None = None):
+    async def post_actions(self, media_id, comment_text: Optional[str] = None):
         hide_fn = getattr(self.cl, "media_hide_like", None)
         if hide_fn is not None:
             try:
