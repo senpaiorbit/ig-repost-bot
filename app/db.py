@@ -105,14 +105,13 @@ def update_job(job_id: str, status: str, media_id: Optional[str] = None, error: 
 def get_job_row(job_id: str):
     con = get_client()
     try:
-        try:
-            con.execute(JOBS_SCHEMA_SQL)
-        except Exception:
-            pass
+        con.execute(JOBS_SCHEMA_SQL)
         cur = con.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
         row = cur.fetchone()
         cols = [d[0] for d in cur.description] if cur.description else []
         return dict(zip(cols, row)) if row else None
+    except Exception:
+        return None
     finally:
         try:
             con.close()
