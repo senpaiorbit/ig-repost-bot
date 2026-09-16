@@ -6,6 +6,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
+from typing import Optional
 
 import pyotp
 from fastapi import Body, FastAPI, HTTPException, Query
@@ -13,18 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.db import (
-    check_connection,
-    count_today_uploads,
-    get_client,
-    get_job_row,
-    get_old_media,
-    init_schema,
-    insert_job,
-    insert_media,
-    update_job,
-    update_status,
-)
+from app.db import (check_connection, count_today_uploads, get_client, get_job_row, get_old_media, init_schema, insert_job, insert_media, update_job, update_status)
 from app.ig import IGClient
 
 
@@ -84,6 +74,11 @@ async def root():
     return {"service": "ig-repost", "status": "ok", "docs": "/docs"}
 
 
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
 @app.post("/upload")
 async def upload(key: str = Query(...), post_type: str = Query("reel"), target_url: str = Body(..., embed=True), comment: str = Query(default=""), cover: str = Query(default=""), sync: int = Query(default=1)):
     verify_api_key(key)
@@ -93,7 +88,7 @@ async def upload(key: str = Query(...), post_type: str = Query("reel"), target_u
 
 
 @app.get("/upload")
-async def upload_get(key: str = Query(...), target_url: str | None = Query(default=None), post_type: str = Query("reel"), comment: str = Query(default=""), cover: str = Query(default=""), sync: int = Query(default=0), amount: int = Query(default=1), cronjob: int = Query(default=0)):
+async def upload_get(key: str = Query(...), target_url: Optional[str] = Query(default=None), post_type: str = Query("reel"), comment: str = Query(default=""), cover: str = Query(default=""), sync: int = Query(default=0), amount: int = Query(default=1), cronjob: int = Query(default=0)):
     verify_api_key(key)
     if target_url and str(target_url).startswith("http"):
         if int(sync or 0):
@@ -224,7 +219,6 @@ async def _run_job(job_id: str, post_type: str, target_url: str, comment: str = 
         except Exception as ue:
             print(f"[job {job_id}] update_job error failed (non-fatal): {ue}")
         print(f"[job {job_id}] failed: {e}")
-
     finally:
         for p in (video_path, cover_path):
             try:
