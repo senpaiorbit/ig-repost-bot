@@ -1,6 +1,7 @@
 """SQLite DB (stdlib) with optional Turso/libsql when available."""
 import os
 import sqlite3
+import tempfile
 from typing import Optional
 
 try:
@@ -16,9 +17,11 @@ JOBS_SCHEMA_SQL = "CREATE TABLE IF NOT EXISTS jobs (job_id TEXT PRIMARY KEY, tar
 
 
 def _local_path() -> str:
-    db_url = settings.TURSO_DATABASE_URL or "file:local.db"
+    db_url = settings.TURSO_DATABASE_URL or ""
     if db_url.startswith("file:"):
         return db_url[5:] or "local.db"
+    if os.environ.get("RENDER") or not os.access(".", os.W_OK):
+        return os.path.join(tempfile.gettempdir(), "local.db")
     return "local.db"
 
 
