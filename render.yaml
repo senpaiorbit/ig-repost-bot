@@ -23,3 +23,6 @@ services:
         sync: false
       - key: CF_API_TOKEN
         sync: false
+      - key: PYTHON_VERSION
+        value: 3.11.0
+        sync: false

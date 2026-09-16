@@ -1,11 +1,10 @@
-fastapi
+fastapi>=0.100.0
 uvicorn[standard]
 aiograpi
-libsql-client
 libsql
 pyotp
 python-multipart
-pydantic
+pydantic>=2.0
 pydantic-settings
 httpx
 pytest
