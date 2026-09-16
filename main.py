@@ -29,12 +29,10 @@ from app.ig import IGClient
 
 
 def verify_api_key(key: str = Query(..., description="API key")) -> str:
-    """Validate API key query param. Dev mode: if settings.API_KEY empty, accept any non-empty."""
     if not key:
         raise HTTPException(status_code=401, detail="missing api key")
     expected = (settings.API_KEY or "").strip()
     if not expected:
-        # dev mode — accept any non-empty key
         return key
     if key != expected:
         raise HTTPException(status_code=403, detail="invalid api key")
@@ -51,23 +49,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ig-repost", docs_url="/docs", redoc_url=None, lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 
 def _find_duplicate(original_url: str):
     con = get_client()
     try:
-        cur = con.execute(
-            "SELECT id FROM uploaded_media WHERE original_url = ? AND status = 'active'",
-            (original_url,),
-        )
+        cur = con.execute("SELECT id FROM uploaded_media WHERE original_url = ? AND status = 'active'", (original_url,))
         return cur.fetchone()
     finally:
         try:
@@ -97,14 +85,7 @@ async def root():
 
 
 @app.post("/upload")
-async def upload(
-    key: str = Query(...),
-    post_type: str = Query("reel"),
-    target_url: str = Body(..., embed=True),
-    comment: str = Query(default=""),
-    cover: str = Query(default=""),
-    sync: int = Query(default=1, description="1=upload inline (default for POST, back-compat), 0=queue background job"),
-):
+async def upload(key: str = Query(...), post_type: str = Query("reel"), target_url: str = Body(..., embed=True), comment: str = Query(default=""), cover: str = Query(default=""), sync: int = Query(default=1)):
     verify_api_key(key)
     if int(sync or 0):
         return await _do_upload(post_type, str(target_url), comment, cover)
@@ -112,28 +93,22 @@ async def upload(
 
 
 @app.get("/upload")
-async def upload_get(
-    key: str = Query(...),
-    target_url: str = Query(...),
-    post_type: str = Query("reel"),
-    comment: str = Query(default=""),
-    cover: str = Query(default=""),
-    sync: int = Query(default=0, description="0=queue background job (default for GET/cron), 1=upload inline"),
-):
+async def upload_get(key: str = Query(...), target_url: str | None = Query(default=None), post_type: str = Query("reel"), comment: str = Query(default=""), cover: str = Query(default=""), sync: int = Query(default=0), amount: int = Query(default=1), cronjob: int = Query(default=0)):
     verify_api_key(key)
-    if int(sync or 0):
-        return await _do_upload(post_type, str(target_url), comment, cover)
-    return await _queue_upload(str(target_url), post_type, comment, cover)
+    if target_url and str(target_url).startswith("http"):
+        if int(sync or 0):
+            return await _do_upload(post_type, str(target_url), comment, cover)
+        return await _queue_upload(str(target_url), post_type, comment, cover)
+    if target_url and str(target_url).strip():
+        raise HTTPException(status_code=400, detail="invalid target_url")
+    return await _queue_auto_upload(amount=amount, comment=comment, cover=cover)
 
 
-# ---- Fire-and-forget job registry -------------------------------------
 JOBS: dict = {}
-
 UPLOAD_LOCK = asyncio.Lock()
 
 
 async def _check_daily_cap() -> bool:
-    """True if daily upload limit reached. Fail-open (False) on DB error."""
     try:
         today = await asyncio.to_thread(count_today_uploads)
     except Exception as e:
@@ -160,14 +135,7 @@ def _new_job_id() -> str:
 
 
 def _job_to_response(job_id: str, job: dict) -> dict:
-    return {
-        "status": job.get("status", "queued"),
-        "job_id": job_id,
-        "media_id": job.get("media_id"),
-        "error": job.get("error"),
-        "target_url": job.get("target_url"),
-        "check": f"/job?id={job_id}",
-    }
+    return {"status": job.get("status", "queued"), "job_id": job_id, "media_id": job.get("media_id"), "error": job.get("error"), "target_url": job.get("target_url"), "check": f"/job?id={job_id}"}
 
 
 async def _queue_upload(target_url: str, post_type: str = "reel", comment: str = "", cover: str = "") -> JSONResponse:
@@ -186,6 +154,24 @@ async def _queue_upload(target_url: str, post_type: str = "reel", comment: str =
         print(f"[job {job_id}] insert_job failed (non-fatal): {e}")
     asyncio.create_task(_run_job(job_id, post_type, target_url, comment, cover))
     return JSONResponse(status_code=202, content={"status": "queued", "job_id": job_id, "check": f"/job?id={job_id}"})
+
+
+async def _queue_auto_upload(amount: int = 1, comment: str = "", cover: str = "") -> JSONResponse:
+    try:
+        amount = max(1, min(3, int(amount or 1)))
+    except Exception:
+        amount = 1
+    if await _check_daily_cap():
+        return JSONResponse(status_code=429, content={"status": "error", "message": "daily limit reached"})
+    job_id = _new_job_id()
+    now = time.time()
+    JOBS[job_id] = {"status": "queued", "media_id": None, "error": None, "target_url": "auto:feed", "post_type": "reel", "mode": "auto", "amount": amount, "comment": comment or "", "cover": cover or "", "created_at": now, "updated_at": now}
+    try:
+        await asyncio.to_thread(insert_job, job_id, "auto:feed", "reel", "queued")
+    except Exception as e:
+        print(f"[job {job_id}] insert_job failed (non-fatal): {e}")
+    asyncio.create_task(_run_auto_job(job_id, amount, comment, cover))
+    return JSONResponse(status_code=202, content={"status": "queued", "job_id": job_id, "mode": "auto", "check": f"/job?id={job_id}"})
 
 
 async def _run_job(job_id: str, post_type: str, target_url: str, comment: str = "", cover: str = ""):
@@ -238,9 +224,7 @@ async def _run_job(job_id: str, post_type: str, target_url: str, comment: str = 
         except Exception as ue:
             print(f"[job {job_id}] update_job error failed (non-fatal): {ue}")
         print(f"[job {job_id}] failed: {e}")
-        msg = str(e)
-        if any(s in msg for s in ("challenge", "Challenge", "429", "throttl")):
-            print(f"[job {job_id}] challenge/rate-limit - manual check needed, backing off")
+
     finally:
         for p in (video_path, cover_path):
             try:
@@ -248,6 +232,99 @@ async def _run_job(job_id: str, post_type: str, target_url: str, comment: str = 
                     Path(str(p)).unlink()
             except Exception:
                 pass
+
+
+async def _run_auto_job(job_id: str, amount: int = 1, comment: str = "", cover: str = ""):
+    job = JOBS.get(job_id)
+    if job is None:
+        return
+    try:
+        amount = max(1, min(3, int(amount or 1)))
+    except Exception:
+        amount = 1
+    job["status"] = "running"
+    job["updated_at"] = time.time()
+    try:
+        await asyncio.to_thread(update_job, job_id, "running")
+    except Exception as e:
+        print(f"[job {job_id}] update_job running failed (non-fatal): {e}")
+    try:
+        try:
+            feed_limit = int(getattr(settings, "AUTO_FEED_LIMIT", 20) or 20)
+        except Exception:
+            feed_limit = 20
+        uploaded: list[str] = []
+        last_media_id = None
+        async with UPLOAD_LOCK:
+            ig = IGClient()
+            await ig.login()
+            cands = await ig.fetch_feed_candidates(limit=feed_limit)
+            if not cands:
+                raise RuntimeError("empty feed — no candidates")
+            for cand in cands:
+                if len(uploaded) >= amount:
+                    break
+                if await _check_daily_cap():
+                    if uploaded:
+                        break
+                    raise RuntimeError("daily limit reached")
+                if cand.startswith("http"):
+                    try:
+                        dup = await asyncio.to_thread(_find_duplicate, cand)
+                    except Exception:
+                        dup = None
+                    if dup:
+                        continue
+                tmpdir = tempfile.mkdtemp(prefix="igdl_")
+                video_path = None
+                cover_path = None
+                try:
+                    video_path = await ig.download_candidate(cand, tmpdir)
+                    cover_url = ((cover or "").strip() or (getattr(settings, "THUMBNAIL_URL", "") or "").strip() or (settings.COVER_IMAGE_URL or "").strip())
+                    try:
+                        cover_path = await ig.download_cover(cover_url) if cover_url else None
+                    except Exception as e:
+                        print(f"[job {job_id}] cover download failed: {e}")
+                        cover_path = None
+                    media = await ig.upload_reel(str(video_path), caption="", thumbnail_path=str(cover_path) if cover_path else None)
+                    media_id = _extract_media_id(media)
+                    await asyncio.sleep(random.uniform(20, 40))
+                    comment_text = (comment or "").strip() or settings.COMMENT_TEXT
+                    await ig.post_actions(media_id, comment_text)
+                    await asyncio.to_thread(insert_media, cand, media_id, "reel")
+                    uploaded.append(media_id)
+                    last_media_id = media_id
+                except Exception as e:
+                    if "duplicate" in str(e).lower():
+                        continue
+                    print(f"[job {job_id}] candidate failed, trying next: {e}")
+                    continue
+                finally:
+                    for p in (video_path, cover_path):
+                        try:
+                            if p and Path(str(p)).exists() and Path(str(p)).is_file():
+                                Path(str(p)).unlink()
+                        except Exception:
+                            pass
+            if not uploaded:
+                raise RuntimeError("all candidates failed")
+        job["status"] = "success"
+        job["media_id"] = last_media_id
+        job["error"] = None
+        job["updated_at"] = time.time()
+        try:
+            await asyncio.to_thread(update_job, job_id, "success", last_media_id, None)
+        except Exception as e:
+            print(f"[job {job_id}] update_job success failed (non-fatal): {e}")
+    except Exception as e:
+        job["status"] = "error"
+        job["error"] = str(e)
+        job["updated_at"] = time.time()
+        try:
+            await asyncio.to_thread(update_job, job_id, "error", None, str(e))
+        except Exception as ue:
+            print(f"[job {job_id}] update_job error failed (non-fatal): {ue}")
+        print(f"[job {job_id}] failed: {e}")
 
 
 def _lookup_job(job_id: str):
