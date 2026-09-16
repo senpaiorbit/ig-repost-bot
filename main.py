@@ -26,6 +26,8 @@ from app.db import (_local_path, check_connection, count_today_uploads, get_clie
 from app.ig import IGClient
 
 LOGS = deque(maxlen=300)
+_LOGIN_CACHE: dict = {"at": 0.0, "state": ""}
+_LOGIN_CACHE_TTL = 300
 
 
 class _buf_handler(logging.Handler):
@@ -65,6 +67,17 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(init_schema)
     except Exception as e:
         print(f"[startup] init_schema failed: {e}")
+    try:
+        ig = IGClient()
+        await asyncio.wait_for(ig.login(), timeout=25)
+        try:
+            who = await asyncio.wait_for(ig.check_login(), timeout=15)
+        except Exception:
+            who = getattr(ig, "username", "") or "?"
+        print(f"[startup] IG login ok: {who}")
+        log.info(f"[startup] IG login ok: {who}")
+    except Exception as e:
+        print(f"[startup] IG login skipped: {e}")
     yield
 
 
@@ -106,7 +119,45 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    try:
+        try:
+            ok = await asyncio.to_thread(check_connection)
+            db = "ok" if ok else "failed: check returned false"
+        except Exception as e:
+            db = f"failed: {e}"
+        try:
+            has_creds = bool(((settings.IG_USERNAME or "").strip()) or ((settings.IG_PASSWORD or "").strip()) or ((settings.IG_SESSIONID or "").strip()))
+        except Exception:
+            has_creds = False
+        if not has_creds:
+            login_state = "skipped: no credentials configured"
+        else:
+            try:
+                now = time.time()
+                cached_at = float(_LOGIN_CACHE.get("at", 0) or 0)
+                cached_state = _LOGIN_CACHE.get("state", "") or ""
+                if cached_state and (now - cached_at) < _LOGIN_CACHE_TTL:
+                    login_state = cached_state
+                else:
+                    probe_ig = IGClient()
+                    await asyncio.wait_for(probe_ig.login(), timeout=25)
+                    try:
+                        who = await asyncio.wait_for(probe_ig.check_login(), timeout=15)
+                    except Exception:
+                        who = getattr(probe_ig, "username", "") or "ok"
+                    login_state = f"ok:{who}"
+                    _LOGIN_CACHE["at"] = now
+                    _LOGIN_CACHE["state"] = login_state
+            except Exception as e:
+                login_state = f"failed:{e}"
+                try:
+                    _LOGIN_CACHE["at"] = time.time()
+                    _LOGIN_CACHE["state"] = login_state
+                except Exception:
+                    pass
+        return {"status": "ok", "db": db, "login": login_state}
+    except Exception as e:
+        return {"status": "ok", "db": f"failed: {e}", "login": "failed: health probe error"}
 
 
 @app.post("/upload")
@@ -153,6 +204,25 @@ def _validate_upload_params(post_type: str, target_url: str) -> tuple[str, str]:
     if not target_url or not str(target_url).startswith("http"):
         raise HTTPException(status_code=400, detail="invalid target_url")
     return pt, str(target_url)
+
+
+def _cover_url(cover: str = "") -> str:
+    explicit = (cover or "").strip()
+    if explicit:
+        return explicit
+    thumb = (getattr(settings, "THUMBNAIL_URL", "") or "").strip()
+    if thumb:
+        return thumb
+    return IGClient.default_cover_url()
+
+
+def _cleanup_paths(*paths) -> None:
+    for p in paths:
+        try:
+            if p and Path(str(p)).exists() and Path(str(p)).is_file():
+                Path(str(p)).unlink()
+        except Exception:
+            pass
 
 
 def _new_job_id() -> str:
@@ -225,7 +295,7 @@ async def _run_job(job_id: str, post_type: str, target_url: str, comment: str = 
             ig = IGClient()
             await ig.login()
             video_path = await ig.download_video(target_url, tmpdir)
-            cover_url = ((cover or "").strip() or (getattr(settings, "THUMBNAIL_URL", "") or "").strip() or (settings.COVER_IMAGE_URL or "").strip())
+            cover_url = _cover_url(cover)
             try:
                 cover_path = await ig.download_cover(cover_url) if cover_url else None
             except Exception as e:
@@ -233,7 +303,7 @@ async def _run_job(job_id: str, post_type: str, target_url: str, comment: str = 
                 cover_path = None
             media = await ig.upload_reel(str(video_path), caption="", thumbnail_path=str(cover_path) if cover_path else None)
             media_id = _extract_media_id(media)
-            await asyncio.sleep(random.uniform(20, 60))
+            await asyncio.sleep(random.uniform(15, 90))
             comment_text = (comment or "").strip() or settings.COMMENT_TEXT
             await ig.post_actions(media_id, comment_text)
             await asyncio.to_thread(insert_media, target_url, media_id, post_type)
@@ -257,12 +327,7 @@ async def _run_job(job_id: str, post_type: str, target_url: str, comment: str = 
         print(f"[job {job_id}] failed: {e}")
         log.info(f"[job {job_id}] error: {str(e)[:200]}")
     finally:
-        for p in (video_path, cover_path):
-            try:
-                if p and Path(str(p)).exists() and Path(str(p)).is_file():
-                    Path(str(p)).unlink()
-            except Exception:
-                pass
+        _cleanup_paths(video_path, cover_path)
 
 
 async def _run_auto_job(job_id: str, amount: int = 1, comment: str = "", cover: str = ""):
@@ -316,7 +381,7 @@ async def _run_auto_job(job_id: str, amount: int = 1, comment: str = "", cover: 
                 cover_path = None
                 try:
                     video_path = await ig.download_candidate(cand, tmpdir)
-                    cover_url = ((cover or "").strip() or (getattr(settings, "THUMBNAIL_URL", "") or "").strip() or (settings.COVER_IMAGE_URL or "").strip())
+                    cover_url = _cover_url(cover)
                     try:
                         cover_path = await ig.download_cover(cover_url) if cover_url else None
                     except Exception as e:
@@ -324,7 +389,7 @@ async def _run_auto_job(job_id: str, amount: int = 1, comment: str = "", cover: 
                         cover_path = None
                     media = await ig.upload_reel(str(video_path), caption="", thumbnail_path=str(cover_path) if cover_path else None)
                     media_id = _extract_media_id(media)
-                    await asyncio.sleep(random.uniform(20, 40))
+                    await asyncio.sleep(random.uniform(15, 60))
                     comment_text = (comment or "").strip() or settings.COMMENT_TEXT
                     await ig.post_actions(media_id, comment_text)
                     await asyncio.to_thread(insert_media, cand, media_id, "reel")
@@ -338,12 +403,7 @@ async def _run_auto_job(job_id: str, amount: int = 1, comment: str = "", cover: 
                     log.info(f"[job {job_id}] candidate failed: {str(cand)[:60]} :: {str(e)[:160]}")
                     continue
                 finally:
-                    for p in (video_path, cover_path):
-                        try:
-                            if p and Path(str(p)).exists() and Path(str(p)).is_file():
-                                Path(str(p)).unlink()
-                        except Exception:
-                            pass
+                    _cleanup_paths(video_path, cover_path)
             if not uploaded:
                 raise RuntimeError(f"0/{len(cands)} candidates ok (tried {tried}), last error: {last_err or 'unknown'}")
         job["status"] = "success"
@@ -398,11 +458,7 @@ async def get_a_job(id: str = Query(..., description="job id (alias of /job)")):
 
 
 async def _do_upload(post_type: str, target_url: str, comment: str = "", cover: str = ""):
-    post_type = (post_type or "reel").lower()
-    if post_type not in ("reel", "post"):
-        raise HTTPException(status_code=400, detail="invalid post_type")
-    if not target_url or not str(target_url).startswith("http"):
-        raise HTTPException(status_code=400, detail="invalid target_url")
+    post_type, target_url = _validate_upload_params(post_type, target_url)
     dup = await asyncio.to_thread(_find_duplicate, str(target_url))
     if dup:
         return JSONResponse(status_code=409, content={"status": "error", "message": "duplicate"})
@@ -415,7 +471,7 @@ async def _do_upload(post_type: str, target_url: str, comment: str = "", cover: 
         ig = IGClient()
         await ig.login()
         video_path = await ig.download_video(str(target_url), tmpdir)
-        cover_url = ((cover or "").strip() or (getattr(settings, "THUMBNAIL_URL", "") or "").strip() or (settings.COVER_IMAGE_URL or "").strip())
+        cover_url = _cover_url(cover)
         try:
             cover_path = await ig.download_cover(cover_url) if cover_url else None
         except Exception as e:
@@ -423,7 +479,7 @@ async def _do_upload(post_type: str, target_url: str, comment: str = "", cover: 
             cover_path = None
         media = await ig.upload_reel(str(video_path), caption="", thumbnail_path=str(cover_path) if cover_path else None)
         media_id = _extract_media_id(media)
-        await asyncio.sleep(random.uniform(20, 60))
+        await asyncio.sleep(random.uniform(15, 90))
         comment_text = (comment or "").strip() or settings.COMMENT_TEXT
         await ig.post_actions(media_id, comment_text)
         await asyncio.to_thread(insert_media, str(target_url), media_id, post_type)
@@ -433,12 +489,7 @@ async def _do_upload(post_type: str, target_url: str, comment: str = "", cover: 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"upload failed: {e}")
     finally:
-        for p in (video_path, cover_path):
-            try:
-                if p and Path(str(p)).exists() and Path(str(p)).is_file():
-                    Path(str(p)).unlink()
-            except Exception:
-                pass
+        _cleanup_paths(video_path, cover_path)
 
 
 @app.post("/archive")
