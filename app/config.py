@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     MAX_UPLOADS_PER_DAY: int = 2
     IG_PROXY: str = ""
     AUTO_FEED_LIMIT: int = 20
+    LOG_LEVEL: str = "INFO"
 
 
 settings = Settings()
