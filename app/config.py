@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     TURSO_DATABASE_URL: str = ""
     TURSO_AUTH_TOKEN: str = ""
     COVER_IMAGE_URL: str = "https://i.ibb.co/sp6WvzJK/1.jpg"
+    COVER_IMAGE_URLS: str = ""
     THUMBNAIL_URL: str = ""
     COMMENT_TEXT: str = "follow me 🔥"
     COMMENT_ENABLED: int = 0

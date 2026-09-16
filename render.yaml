@@ -19,6 +19,30 @@ services:
         sync: false
       - key: TURSO_AUTH_TOKEN
         sync: false
+      - key: COMMENT_TEXT
+        sync: false
+      - key: COMMENT_ENABLED
+        sync: false
+      - key: COVER_IMAGE_URL
+        sync: false
+      - key: THUMBNAIL_URL
+        sync: false
+      - key: COVER_IMAGE_URLS
+        sync: false
+      - key: SESSION_FILE
+        sync: false
+      - key: MAX_UPLOADS_PER_DAY
+        sync: false
+      - key: IG_PROXY
+        sync: false
+      - key: AUTO_FEED_LIMIT
+        sync: false
+      - key: LOG_LEVEL
+        sync: false
+      - key: TOTP_PROVIDER_URL
+        sync: false
+      - key: SOURCE_USERNAMES
+        sync: false
       - key: CF_ACCOUNT_ID
         sync: false
       - key: CF_API_TOKEN
