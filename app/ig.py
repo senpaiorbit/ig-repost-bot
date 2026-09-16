@@ -47,6 +47,7 @@ class IGClient:
         self.password = settings.IG_PASSWORD
         self.sessionid = settings.IG_SESSIONID
         self.totp_seed = settings.IG_TOTP_SEED
+        self._video_urls: dict = {}
 
     def _session_path(self) -> str:
         try:
@@ -185,6 +186,27 @@ class IGClient:
         return (cand or "").strip() if isinstance(cand, str) else cand
 
     async def download_candidate(self, cand: str, dest_dir) -> Path:
+        try:
+            direct = (self._video_urls or {}).get(cand)
+        except Exception:
+            direct = None
+        if direct:
+            try:
+                dest = Path(dest_dir)
+                dest.mkdir(parents=True, exist_ok=True)
+                slug = "".join(ch for ch in str(cand) if ch.isalnum())[-12:] or "vid"
+                out = dest / f"cand_{slug}.mp4"
+                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                    r = await client.get(direct)
+                    r.raise_for_status()
+                    data = r.content
+                ctype = (r.headers.get("content-type", "") or "").lower()
+                if ("video" in ctype) or (len(data) > 100 * 1024):
+                    out.write_bytes(data)
+                    return out
+                print(f"[ig] direct video url rejected (ctype={ctype!r}, bytes={len(data)})")
+            except Exception as e:
+                print(f"[ig] direct video download failed, falling back: {e}")
         if isinstance(cand, str) and cand.startswith("pk:"):
             dest = Path(dest_dir)
             dest.mkdir(parents=True, exist_ok=True)
@@ -214,6 +236,11 @@ class IGClient:
 
     @staticmethod
     def _cand_url(item) -> Optional[str]:
+        try:
+            if IGClient._is_ad(item):
+                return None
+        except Exception:
+            pass
         code = None
         pk = None
         mtype = ""
@@ -247,6 +274,69 @@ class IGClient:
         return None
 
     @staticmethod
+    def _is_ad(item) -> bool:
+        for key in ("is_ad", "ad_action", "ad_id", "sponsored_info", "is_paid_partnership"):
+            try:
+                v = item.get(key) if isinstance(item, dict) else getattr(item, key, None)
+            except Exception:
+                continue
+            if v:
+                return True
+        return False
+
+    @staticmethod
+    def _video_url(item) -> Optional[str]:
+        def _field(obj, name):
+            try:
+                if isinstance(obj, dict):
+                    return obj.get(name)
+                return getattr(obj, name, None)
+            except Exception:
+                return None
+        def _pick(cands):
+            best = None
+            best_w = -1
+            try:
+                for c in (cands or []):
+                    if isinstance(c, dict):
+                        u = c.get("url")
+                        w = c.get("width", 0) or 0
+                    else:
+                        u = getattr(c, "url", None)
+                        try:
+                            w = getattr(c, "width", 0) or 0
+                        except Exception:
+                            w = 0
+                    if not u or not str(u).startswith("http"):
+                        continue
+                    try:
+                        w = int(w)
+                    except Exception:
+                        w = 0
+                    if w >= best_w:
+                        best, best_w = str(u), w
+            except Exception:
+                pass
+            return best
+        try:
+            direct = _field(item, "video_url")
+            if direct and str(direct).startswith("http"):
+                return str(direct)
+            for key in ("video_versions", "candidates"):
+                u = _pick(_field(item, key))
+                if u:
+                    return u
+            car = _field(item, "carousel_media")
+            if isinstance(car, list) and car:
+                for sub in car:
+                    u = IGClient._video_url(sub)
+                    if u:
+                        return u
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
     def _feed_items(payload) -> list:
         if payload is None:
             return []
@@ -276,6 +366,10 @@ class IGClient:
             lim = 20
         out: list[str] = []
         seen = set()
+        try:
+            self._video_urls = {}
+        except Exception:
+            pass
         for name in ("get_timeline_feed", "get_reels_tray_feed", "timeline_feed", "reels_feed", "explore_feed", "get_explore_feed"):
             fn = getattr(self.cl, name, None)
             if fn is None:
@@ -296,6 +390,15 @@ class IGClient:
                     continue
                 if not url or url in seen:
                     continue
+                try:
+                    vurl = self._video_url(item)
+                except Exception:
+                    vurl = None
+                if vurl:
+                    try:
+                        self._video_urls[url] = vurl
+                    except Exception:
+                        pass
                 seen.add(url)
                 out.append(url)
                 if len(out) >= lim:
