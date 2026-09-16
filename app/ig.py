@@ -8,15 +8,7 @@ from pathlib import Path
 import httpx
 import pyotp
 from aiograpi import Client
-
 from app.config import settings
-
-
-async def _call(fn, *args, **kwargs):
-    res = fn(*args, **kwargs)
-    if inspect.isawaitable(res):
-        return await res
-    return res
 
 
 async def _maybe_thread(fn, *args, **kwargs):
@@ -96,13 +88,10 @@ class IGClient:
                 fn = getattr(self.cl, "login_by_sessionid", None)
                 if fn is None:
                     raise AttributeError("login_by_sessionid missing")
-                try:
-                    if inspect.iscoroutinefunction(fn):
-                        await fn(self.sessionid)
-                    else:
-                        await asyncio.to_thread(fn, self.sessionid)
-                except TypeError:
+                if inspect.iscoroutinefunction(fn):
                     await fn(self.sessionid)
+                else:
+                    await asyncio.to_thread(fn, self.sessionid)
                 print("[ig] logged in via sessionid")
                 await self._dump_session()
                 return True
@@ -118,8 +107,7 @@ class IGClient:
                 await login_fn(self.username, self.password, **kwargs)
             else:
                 await asyncio.to_thread(login_fn, self.username, self.password, **kwargs)
-        except TypeError as e:
-            print(f"[ig] login TypeError, retrying without code: {e}")
+        except TypeError:
             if inspect.iscoroutinefunction(login_fn):
                 await login_fn(self.username, self.password)
             else:
@@ -156,6 +144,129 @@ class IGClient:
                 last_err = e
                 continue
         raise RuntimeError(f"download_video failed: {last_err}")
+
+    async def resolve_candidate(self, cand: str) -> str:
+        return (cand or "").strip() if isinstance(cand, str) else cand
+
+    async def download_candidate(self, cand: str, dest_dir) -> Path:
+        if isinstance(cand, str) and cand.startswith("pk:"):
+            dest = Path(dest_dir)
+            dest.mkdir(parents=True, exist_ok=True)
+            pk = int(cand[3:])
+            last_err = None
+            for name in ("video_download", "clip_download"):
+                fn = getattr(self.cl, name, None)
+                if fn is None:
+                    continue
+                try:
+                    if inspect.iscoroutinefunction(fn):
+                        res = await fn(pk, folder=dest)
+                    else:
+                        res = await asyncio.to_thread(fn, pk, folder=dest)
+                    if res is not None:
+                        return Path(res)
+                    vids = sorted(dest.glob("*.mp4"), key=lambda p: p.stat().st_mtime if p.exists() else 0)
+                    if vids:
+                        return vids[-1]
+                    return dest
+                except Exception as e:
+                    print(f"[ig] {name} failed: {e}")
+                    last_err = e
+                    continue
+            raise RuntimeError(f"download_candidate failed: {last_err}")
+        return await self.download_video(str(cand), dest_dir)
+
+    @staticmethod
+    def _cand_url(item) -> str | None:
+        code = None
+        pk = None
+        mtype = ""
+        ptype = ""
+        if isinstance(item, dict):
+            code = item.get("code")
+            pk = item.get("pk") or item.get("id")
+            mtype = str(item.get("media_type", "") or "")
+            ptype = str(item.get("product_type", "") or "")
+        else:
+            code = getattr(item, "code", None)
+            pk = getattr(item, "pk", None) or getattr(item, "id", None)
+            try:
+                mtype = str(getattr(item, "media_type", "") or "")
+            except Exception:
+                mtype = ""
+            try:
+                ptype = str(getattr(item, "product_type", "") or "")
+            except Exception:
+                ptype = ""
+        if code:
+            blob = f"{mtype} {ptype}".lower()
+            is_video = ("2" in blob) or any(w in blob for w in ("clip", "video", "reel", "igtv"))
+            kind = "reel" if is_video else "p"
+            return f"https://www.instagram.com/{kind}/{code}/"
+        if pk is not None:
+            try:
+                return f"pk:{int(pk)}"
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    @staticmethod
+    def _feed_items(payload) -> list:
+        if payload is None:
+            return []
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            for key in ("feed_items", "items", "tray", "reels", "results"):
+                val = payload.get(key)
+                if isinstance(val, list) and val:
+                    return val
+            return []
+        for attr in ("feed_items", "items", "tray", "reels"):
+            try:
+                val = getattr(payload, attr, None)
+            except Exception:
+                continue
+            if callable(val):
+                continue
+            if isinstance(val, list) and val:
+                return val
+        return []
+
+    async def fetch_feed_candidates(self, limit: int = 20) -> list[str]:
+        try:
+            lim = max(1, int(limit or 20))
+        except Exception:
+            lim = 20
+        out: list[str] = []
+        seen = set()
+        for name in ("get_timeline_feed", "get_reels_tray_feed", "timeline_feed", "reels_feed", "explore_feed", "get_explore_feed"):
+            fn = getattr(self.cl, name, None)
+            if fn is None:
+                continue
+            try:
+                payload = await _maybe_thread(fn)
+            except Exception as e:
+                print(f"[ig] {name} failed: {e}")
+                continue
+            try:
+                items = self._feed_items(payload)
+            except Exception:
+                continue
+            for item in items:
+                try:
+                    url = self._cand_url(item)
+                except Exception:
+                    continue
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                out.append(url)
+                if len(out) >= lim:
+                    return out
+            if out:
+                break
+        return out[:lim]
 
     async def download_cover(self, url: str | None = None) -> Path:
         src = url or settings.COVER_IMAGE_URL
