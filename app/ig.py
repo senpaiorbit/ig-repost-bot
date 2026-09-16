@@ -15,7 +15,6 @@ from app.config import settings
 
 
 async def _call(fn, *args, **kwargs):
-    """Run aiograpi call without blocking the loop."""
     res = fn(*args, **kwargs)
     if inspect.isawaitable(res):
         return await res
@@ -295,6 +294,14 @@ class IGClient:
             except ValueError:
                 raise RuntimeError(f"bad pk candidate: {cand}")
             try:
+                to_code = getattr(self.cl, "media_pk_to_code", None) or getattr(self.cl, "media_id_to_code", None)
+                if callable(to_code):
+                    code = await _maybe_thread(to_code, pk)
+                    if code and str(code).strip():
+                        return await self.download_via_embed(str(code).strip(), dest)
+            except Exception as e:
+                print(f"[ig] pk->code/embed failed: {e}")
+            try:
                 return await self.download_via_media_info(pk, dest)
             except Exception as e:
                 print(f"[ig] media_info download failed: {e}")
@@ -489,9 +496,17 @@ class IGClient:
                 seen.add(url)
                 out.append(url)
                 if len(out) >= lim:
+                    try:
+                        print(f"[ig] feed: {len(out)} candidates, {len(self._video_urls)} with direct url, sample={[str(s)[:60] for s in out[:3]]}")
+                    except Exception:
+                        pass
                     return out
             if out:
                 break
+        try:
+            print(f"[ig] feed: {len(out)} candidates, {len(self._video_urls)} with direct url, sample={[str(s)[:60] for s in out[:3]]}")
+        except Exception:
+            pass
         return out[:lim]
 
     async def download_cover(self, url: Optional[str] = None) -> Path:
