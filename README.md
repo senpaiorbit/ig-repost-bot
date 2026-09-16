@@ -14,7 +14,8 @@ FastAPI skeleton for IG repost bot (stubs only).
 Docs: `/docs`
 
 Cron (single request — no polling needed):
-- `GET /upload?key=KEY&target_url=URL` → `202 {"status":"queued","job_id":...}` (upload continues server-side in background; `sync=0` default for GET).
+- AUTO upload-from-feed (no `target_url`, cron-friendly, 30s-safe): `GET /upload?key=KEY&amount=1&cover=URL&comment=TEXT&cronjob=1` → `202 {"status":"queued","job_id":...,"mode":"auto"}` (upload continues server-side in background). Bare `GET /upload?key=KEY` (no `target_url`) also goes AUTO with `amount=1`.
+- Explicit URL: `GET /upload?key=KEY&target_url=URL` → `202 {"status":"queued","job_id":...}` (upload continues server-side in background; `sync=0` default for GET).
 - Optional status check: `GET /job?id=JOB_ID` (alias `GET /a_job?id=JOB_ID`).
 - Manual/sync upload: `GET /upload?key=KEY&target_url=URL&sync=1` or `POST /upload?key=KEY&sync=1` with body `{"target_url": "..."}` (POST defaults to `sync=1` for back-compat).
 

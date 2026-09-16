@@ -12,11 +12,12 @@ class Settings(BaseSettings):
     TURSO_AUTH_TOKEN: str = ""
     COVER_IMAGE_URL: str = "https://i.ibb.co/sp6WvzJK/1.jpg"
     THUMBNAIL_URL: str = ""
-    COMMENT_TEXT: str = "follow me \U0001F525"
+    COMMENT_TEXT: str = "follow me 🔥"
     COMMENT_ENABLED: int = 0
     SESSION_FILE: str = "session.json"
     MAX_UPLOADS_PER_DAY: int = 2
     IG_PROXY: str = ""
+    AUTO_FEED_LIMIT: int = 20
 
 
 settings = Settings()
