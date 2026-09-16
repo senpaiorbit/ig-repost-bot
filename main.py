@@ -1,6 +1,7 @@
 """ig-repost FastAPI app."""
 import asyncio
 import contextlib
+import os
 import random
 import tempfile
 import time
@@ -13,8 +14,13 @@ from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+try:
+    import libsql as _libsql
+except ImportError:
+    _libsql = None
+
 from app.config import settings
-from app.db import (check_connection, count_today_uploads, get_client, get_job_row, get_old_media, init_schema, insert_job, insert_media, update_job, update_status)
+from app.db import (_local_path, check_connection, count_today_uploads, get_client, get_job_row, get_old_media, init_schema, insert_job, insert_media, update_job, update_status)
 from app.ig import IGClient
 
 
@@ -354,7 +360,7 @@ async def get_a_job(id: str = Query(..., description="job id (alias of /job)")):
 async def _do_upload(post_type: str, target_url: str, comment: str = "", cover: str = ""):
     post_type = (post_type or "reel").lower()
     if post_type not in ("reel", "post"):
-        raise HTTPException(status_code=400, detail="post_type must be reel|post")
+        raise HTTPException(status_code=400, detail="invalid post_type")
     if not target_url or not str(target_url).startswith("http"):
         raise HTTPException(status_code=400, detail="invalid target_url")
     dup = await asyncio.to_thread(_find_duplicate, str(target_url))
@@ -443,6 +449,89 @@ async def check_login():
         return {"status": "ok", "username": username}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"login check failed: {e}")
+
+
+@app.get("/turso_check")
+async def turso_check():
+    try:
+        db_url = (settings.TURSO_DATABASE_URL or "").strip()
+        turso_configured = bool(db_url and not db_url.startswith("file:"))
+        backend = "turso" if (_libsql is not None and turso_configured) else "sqlite"
+        def _probe():
+            con = get_client()
+            try:
+                tables = {}
+                for t in ("uploaded_media", "jobs"):
+                    try:
+                        cur = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (t,))
+                        tables[t] = cur.fetchone() is not None
+                    except Exception:
+                        tables[t] = False
+                def _count(sql, params=()):
+                    try:
+                        cur = con.execute(sql, params)
+                        row = cur.fetchone()
+                        return int(row[0]) if row and row[0] is not None else 0
+                    except Exception:
+                        return 0
+                counts = {"active_media": 0, "jobs_queued": 0, "jobs_running": 0, "jobs_success": 0, "jobs_error": 0}
+                if tables.get("uploaded_media"):
+                    counts["active_media"] = _count("SELECT COUNT(*) FROM uploaded_media WHERE status='active'")
+                if tables.get("jobs"):
+                    for st in ("queued", "running", "success", "error"):
+                        counts[f"jobs_{st}"] = _count("SELECT COUNT(*) FROM jobs WHERE status=?", (st,))
+                return tables, counts
+            finally:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+        tables, counts = await asyncio.to_thread(_probe)
+        if backend == "sqlite":
+            try:
+                path = _local_path()
+            except Exception:
+                path = "local.db"
+            if os.path.exists(path):
+                writable = bool(os.access(path, os.W_OK))
+            else:
+                parent = os.path.dirname(os.path.abspath(path)) or "."
+                try:
+                    writable = bool(os.access(parent, os.W_OK))
+                except Exception:
+                    writable = False
+        else:
+            path = "remote"
+            writable = True
+        return {"status": "ok", "backend": backend, "path": path, "writable": writable, "tables": tables, "counts": counts, "turso_configured": turso_configured}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.get("/reconnect")
+async def reconnect(key: str = Query(...), reset: int = Query(default=0)):
+    verify_api_key(key)
+    fresh = bool(int(reset or 0))
+    if fresh:
+        try:
+            sess = (getattr(settings, "SESSION_FILE", "") or "").strip() or "session.json"
+            p = Path(sess)
+            if p.exists():
+                p.unlink()
+        except Exception as e:
+            print(f"[reconnect] session reset failed: {e}")
+    try:
+        ig = IGClient()
+        await ig.login()
+        username = await ig.check_login()
+        try:
+            sess = (getattr(settings, "SESSION_FILE", "") or "").strip() or "session.json"
+            saved = Path(sess).exists()
+        except Exception:
+            saved = False
+        return {"status": "ok", "username": username, "session_saved": saved, "fresh": fresh}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"reconnect failed: {e}")
 
 
 @app.get("/check_totp")
