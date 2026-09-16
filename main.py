@@ -1,11 +1,13 @@
 """ig-repost FastAPI app."""
 import asyncio
 import contextlib
+import logging
 import os
 import random
 import tempfile
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -22,6 +24,28 @@ except ImportError:
 from app.config import settings
 from app.db import (_local_path, check_connection, count_today_uploads, get_client, get_job_row, get_old_media, init_schema, insert_job, insert_media, update_job, update_status)
 from app.ig import IGClient
+
+LOGS = deque(maxlen=300)
+
+
+class _buf_handler(logging.Handler):
+    def emit(self, record):
+        try:
+            LOGS.append(self.format(record))
+        except Exception:
+            pass
+
+BufferHandler = _buf_handler
+log = logging.getLogger("igrep")
+try:
+    _live_handler = _buf_handler()
+    _live_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"))
+    _live_handler.setLevel(logging.INFO)
+    _root_logger = logging.getLogger()
+    _root_logger.addHandler(_live_handler)
+    _root_logger.setLevel(logging.INFO)
+except Exception as _live_err:
+    print(f"[startup] log buffer attach failed: {_live_err}")
 
 
 def verify_api_key(key: str = Query(..., description="API key")) -> str:
@@ -172,6 +196,7 @@ async def _queue_auto_upload(amount: int = 1, comment: str = "", cover: str = ""
     except Exception as e:
         print(f"[job {job_id}] insert_job failed (non-fatal): {e}")
     asyncio.create_task(_run_auto_job(job_id, amount, comment, cover))
+    log.info(f"[job {job_id}] queued auto amount={amount}")
     return JSONResponse(status_code=202, content={"status": "queued", "job_id": job_id, "mode": "auto", "check": f"/job?id={job_id}"})
 
 
@@ -216,6 +241,7 @@ async def _run_job(job_id: str, post_type: str, target_url: str, comment: str = 
             await asyncio.to_thread(update_job, job_id, "success", media_id, None)
         except Exception as e:
             print(f"[job {job_id}] update_job success failed (non-fatal): {e}")
+        log.info(f"[job {job_id}] success media_id={media_id}")
     except Exception as e:
         job["status"] = "error"
         job["error"] = str(e)
@@ -225,6 +251,7 @@ async def _run_job(job_id: str, post_type: str, target_url: str, comment: str = 
         except Exception as ue:
             print(f"[job {job_id}] update_job error failed (non-fatal): {ue}")
         print(f"[job {job_id}] failed: {e}")
+        log.info(f"[job {job_id}] error: {str(e)[:200]}")
     finally:
         for p in (video_path, cover_path):
             try:
@@ -261,6 +288,7 @@ async def _run_auto_job(job_id: str, amount: int = 1, comment: str = "", cover: 
             ig = IGClient()
             await ig.login()
             cands = await ig.fetch_feed_candidates(limit=feed_limit)
+            log.info(f"[job {job_id}] feed fetched: {len(cands)} candidates")
             if not cands:
                 raise RuntimeError("empty feed — no candidates")
             for cand in cands:
@@ -303,6 +331,7 @@ async def _run_auto_job(job_id: str, amount: int = 1, comment: str = "", cover: 
                     if "duplicate" in str(e).lower():
                         continue
                     print(f"[job {job_id}] candidate failed, trying next: {e}")
+                    log.info(f"[job {job_id}] candidate failed: {str(cand)[:60]} :: {str(e)[:160]}")
                     continue
                 finally:
                     for p in (video_path, cover_path):
@@ -321,6 +350,7 @@ async def _run_auto_job(job_id: str, amount: int = 1, comment: str = "", cover: 
             await asyncio.to_thread(update_job, job_id, "success", last_media_id, None)
         except Exception as e:
             print(f"[job {job_id}] update_job success failed (non-fatal): {e}")
+        log.info(f"[job {job_id}] success media_id={last_media_id}")
     except Exception as e:
         job["status"] = "error"
         job["error"] = str(e)
@@ -330,6 +360,7 @@ async def _run_auto_job(job_id: str, amount: int = 1, comment: str = "", cover: 
         except Exception as ue:
             print(f"[job {job_id}] update_job error failed (non-fatal): {ue}")
         print(f"[job {job_id}] failed: {e}")
+        log.info(f"[job {job_id}] error: {str(e)[:200]}")
 
 
 def _lookup_job(job_id: str):
@@ -549,3 +580,32 @@ async def check_totp():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"totp failed: {e}")
     return {"status": "ok", "code_prefix": code[:2]}
+
+
+@app.get("/live")
+async def live(key: str = Query(...), n: int = Query(default=100), clear: int = Query(default=0)):
+    verify_api_key(key)
+    if int(clear or 0):
+        try:
+            LOGS.clear()
+        except Exception:
+            pass
+    try:
+        nn = max(1, int(n or 100))
+    except Exception:
+        nn = 100
+    jobs = {}
+    try:
+        for jid, j in list(JOBS.items()):
+            try:
+                err = j.get("error")
+                jobs[jid] = {"status": j.get("status"), "media_id": j.get("media_id"), "error": (str(err)[:200] if err is not None else None)}
+            except Exception:
+                continue
+    except Exception:
+        pass
+    try:
+        logs = list(LOGS)[-nn:]
+    except Exception:
+        logs = []
+    return {"service": "ig-repost", "logs": logs, "jobs": jobs}
